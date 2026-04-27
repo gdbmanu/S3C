@@ -5,9 +5,9 @@ checkpoints*/
 *.ckpt
 
 # Données
-data/
-datasets/
-imagenet/
+/data/
+/datasets/
+/imagenet/
 
 # Logs
 *.csv
