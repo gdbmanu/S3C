@@ -1,4 +1,4 @@
-# S3C — Foveated Vision with Saccadic Self-Supervised Learning
+# S3C — Self-Supervised Space Construction with foveated vision
 
 Self-supervised learning with foveated vision and saccadic eye movements,
 built on DINOv1 ViT-Base/8.
@@ -6,7 +6,7 @@ built on DINOv1 ViT-Base/8.
 ## Architecture
 
 - **FoveatedMultiViT** : ViT with foveal pyramid mosaic input (4 scales, 2×2)
-- **Dynamic pos embedding** : positional embeddings adapted to each saccade
+- **Multiple views on the same scene** 
 - **Teacher-student EMA** : cross-saccade feature prediction with shift regression
 
 ## Installation
