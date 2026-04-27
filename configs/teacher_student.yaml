@@ -1,0 +1,17 @@
+defaults:
+  - base
+
+training:
+  epochs:       30
+  lr:           1e-4
+  batch_size:   32
+  log_interval: 100
+  ema_momentum: 0.9999
+  std_min:      0.1
+  std_max:      0.5
+  save_dir:     ./checkpoints_teacher_student
+
+model:
+  student:
+    backbone_lr_scale: 0.01
+    head_lr_scale:     0.1

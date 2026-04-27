@@ -1,0 +1,22 @@
+model:
+  name: vit_base_patch8_224.dino
+  pretrained: true
+  patch_size: 8
+  img_size: 224
+  mosaic_size: 128
+  mosaic_sub_patch_grid: 8
+  scales: [1.0, 0.5, 0.25, 0.125]
+
+data:
+  train_dir: /path/to/imagenet/train
+  val_dir:   /path/to/imagenet/val
+  resize: 512
+  crop:   512
+  zoom:   1.5
+  std:    0.3
+  num_workers: 4
+
+training:
+  batch_size: 32
+  device: cuda
+  save_dir: ./checkpoints

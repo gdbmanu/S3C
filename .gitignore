@@ -1,0 +1,46 @@
+# Checkpoints et sauvegardes — toujours en local
+checkpoints*/
+*.pt
+*.pth
+*.ckpt
+
+# Données
+data/
+datasets/
+imagenet/
+
+# Logs
+*.csv
+*.log
+runs/
+wandb/
+lightning_logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environnements
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
