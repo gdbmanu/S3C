@@ -5,6 +5,9 @@ import torch.nn as nn
 
 from torchvision.transforms import functional as FF
 
+from PIL import Image
+
+
 
 class ShiftZoomUplet:
     def __init__(self, zoom=1.5, std=0.3, n_uplet=5, start_center=False):

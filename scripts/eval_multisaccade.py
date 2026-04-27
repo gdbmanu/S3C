@@ -18,7 +18,6 @@ from s3c.data.datasets import ShiftZoomUplet, FoveatedUpletDataset
 
 import timm
 
-from PIL import Image
 
 from tqdm import tqdm
 
@@ -27,7 +26,7 @@ from tqdm import tqdm
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
 batch_size = 256
 num_workers = 4
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu" #torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 resolution = 128
 embed_dim = 768
@@ -50,11 +49,11 @@ val_dir = os.path.join(mount_point, "val")
 # train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
 # val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
 
-load_dir = "./checkpoints_EMA_Xattn_260321"
+load_dir = "../checkpoints/checkpoints_EMA_Xattn_260321"
 
 epoch_teacher = 20
 
-linear_head_dir = "./checkpoints_260414_EMA_Xattn_1_view"
+linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
 #linear_head_dir = "./checkpoints_260414_base_1_view"
 
 
@@ -66,18 +65,18 @@ n_views = 10
 
 zoom = 1.5
 
-save_dir = "./checkpoints_260414_EMA_Xattn_1_view"
+save_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
 #save_dir = "./checkpoints_260319_base_1_view"
 
 zoom = 1.5
 
-std = 0.5
+std = 0.5 / zoom
 
 # Charger un ViT Tiny via timm
 
-img = Image.open(urlopen(
-    'https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/beignets-task-guide.png'
-))
+#img = Image.open(urlopen(
+#    'https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/beignets-task-guide.png'
+#))
 
 #model = timm.create_model('vit_tiny_patch16_224.augreg_in21k', pretrained=True)
 
@@ -169,7 +168,7 @@ with torch.no_grad():
 
 
     val_dataset = FoveatedUpletDataset(
-                    base_dataset      = val_dataset_raw,
+                    root              = val_dataset_raw,
                     shift_zoom_uplet  = uplet_tf,
                     output_size       = 128,
                     resize            = 512,
