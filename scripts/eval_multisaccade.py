@@ -181,7 +181,7 @@ with torch.no_grad():
                     batch_size  = batch_size,
                     shuffle     = True,
                     num_workers = num_workers,
-                    pin_memory  = True,
+                    #pin_memory  = True,
                 )
 
     total = 0
