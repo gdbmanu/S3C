@@ -8,68 +8,6 @@ import numpy as np
 
 import random
 
-class FoveatedPairDataset(Dataset):
-    def __init__(self, 
-                 root, 
-                 zoom, 
-                 std, 
-                 fovea_transform, 
-                 resize=512,
-                 crop=512,
-                 start_center=True, 
-                 preprocess=None, 
-                 limit=None):
-        self.pre_process = transforms.Compose([
-            transforms.Resize(resize),
-            transforms.CenterCrop(crop),
-        ])
-        self.base_dataset = datasets.ImageFolder(root, transform=None)
-        self.shiftzoom_transform = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=2, start_center=start_center)
-        self.fovea_transform = fovea_transform
-        self.post_process = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std =[0.229, 0.224, 0.225])
-        ])
-        if limit:
-            self.base_dataset.samples = self.base_dataset.samples[:limit]
-
-    @torch.no_grad()
-    def __getitem__(self, idx):          
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                img, _ = self.base_dataset[idx]
-
-                # pre-processing
-                img = self.pre_process(img)                  # PIL 512×512
-
-                # 2 views only
-                views = self.shiftzoom_transform(img)
-                # views : (img_shifted, sx, sy, zoom)) 
-
-                img1, x1, y1, _ = views[0]
-                img2, x2, y2, _ = views[1]
-                shift = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
-                
-                img1 = transforms.Resize(512)(img1)
-                img1 = transforms.CenterCrop(512)(img1)
-                img2 = transforms.Resize(512)(img2)
-                img2 = transforms.CenterCrop(512)(img2)
-
-                # appliquer fovéation + post_process
-                level = np.random.randint(4)
-                img1 = self.post_process(self.fovea_transform(img1, level=level))
-                img2 = self.post_process(self.fovea_transform(img2))
-
-                return img1, img2, shift
-
-            except (OSError, IOError) as e:
-                print(f"[Dataset] Erreur accès idx={idx}, tentative {attempt+1}/{max_retries} : {e}")
-                idx = random.randint(0, len(self) - 1)
-
-        raise RuntimeError(f"Impossible de charger un exemple après {max_retries} tentatives.")
-    
 
 """class FoveatedUpletDataset(Dataset):
     def __init__(self, root, shiftzoom_transform, fovea_transform,  preprocess=None, limit=None):
@@ -113,52 +51,58 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
     """
     def __init__(self,
                  root,           # ImageFolder SANS transform (ou transform=None)
-                 shift_zoom_uplet,
+                 zoom, 
+                 std,
+                 n_uplet,
                  output_size   = 128,
-                 resize        = 512,
-                 crop          = 512,
-                 mean          = (0.485, 0.456, 0.406),
-                 std           = (0.229, 0.224, 0.225)):
+                 start_center=False, 
+                 ):
+        
         self.base    = root
-        self.sz      = shift_zoom_uplet
+        self.shiftzoom_transform      = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet, start_center=start_center)
 
         # ── pré-traitement image brute (une fois par sample) ────────────
-        self.pre = transforms.Compose([
-            transforms.Resize(resize),
-            transforms.CenterCrop(crop),
-        ])
+        #self.pre = transforms.Compose([
+        #    transforms.Resize(resize),
+        #    transforms.CenterCrop(crop),
+        #])
 
         # ── post-traitement par vue ──────────────────────────────────────
         self.fov       = FoveatedPyramidTransform(output_size=output_size)
-        self.to_tensor = transforms.ToTensor()
-        self.normalize = transforms.Normalize(mean=mean, std=std)
+        self.post_process = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std =[0.229, 0.224, 0.225])
+        ])
 
     def __getitem__(self, idx):
         img, label = self.base[idx]          # img = PIL brute
 
         # 1. Resize / crop (une seule fois)
-        img = self.pre(img)                  # PIL 512×512
+        # img = self.pre(img)                  # PIL 512×512
 
         # 2. n_uplet vues shiftées/zoomées
-        views = self.sz(img)                 # liste de (pil, sx, sy, zoom)
+        views = self.shiftzoom_transform(img)                 # liste de (view, sx, sy, zoom)
 
-        mosaics, sxs, sys_, zooms = [], [], [], []
-        for pil, sx, sy, zoom in views:
+        fov_views, sxs, sys_, zooms = [], [], [], []
+        for view, sx, sy, zoom in views:
+
+            view = transforms.Resize(512)(view)
+            view = transforms.CenterCrop(512)(view)
 
             # 3. Mosaïque fovéale
-            mosaic = self.fov(pil)           # PIL 128×128
+            view = self.fov(view)           # PIL 128×128
 
             # 4. ToTensor + Normalize
-            mosaic = self.to_tensor(mosaic)  # (3, 128, 128)  float32 [0,1]
-            mosaic = self.normalize(mosaic)  # normalisé ImageNet
+            view = self.post_process(view)
 
-            mosaics.append(mosaic)
+            fov_views.append(view)
             sxs.append(sx)
             sys_.append(sy)
             zooms.append(zoom)
 
         return (
-            torch.stack(mosaics),                          # (V, 3, 128, 128)
+            torch.stack(fov_views),                          # (V, 3, 128, 128)
             torch.tensor(sxs,   dtype=torch.float32),      # (V,)
             torch.tensor(sys_,  dtype=torch.float32),      # (V,)
             torch.tensor(zooms, dtype=torch.float32),      # (V,)
@@ -167,14 +111,79 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.base)
+    
+class FoveatedPairDataset(Dataset):
+    def __init__(self, 
+                 root, 
+                 zoom, 
+                 std, 
+                 output_size=128,
+                 start_center=True, 
+                 preprocess=None, 
+                 limit=None):
+        #self.pre_process = transforms.Compose([
+        #    transforms.Resize(resize),
+        #    transforms.CenterCrop(crop),
+        #])
+        self.base_dataset = datasets.ImageFolder(root, transform=None)
+        self.shiftzoom_transform = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=2, start_center=start_center)
+        self.fovea_transform       = FoveatedPyramidTransform(output_size=output_size)
+        self.post_process = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std =[0.229, 0.224, 0.225])
+        ])
+        if limit:
+            self.base_dataset.samples = self.base_dataset.samples[:limit]
+
+    @torch.no_grad()
+    def __getitem__(self, idx):          
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                img, _ = self.base_dataset[idx]
+
+                # pre-processing
+                #img = self.pre_process(img)                  # PIL 512×512
+
+                # 2 views only
+                views = self.shiftzoom_transform(img)
+                # views : (img_shifted, sx, sy, zoom)) 
+
+                img1, x1, y1, _ = views[0]
+                img2, x2, y2, _ = views[1]
+                shift = torch.tensor([x2 - x1, y2 - y1], dtype=torch.float32)
+                
+                img1 = transforms.Resize(512)(img1)
+                img1 = transforms.CenterCrop(512)(img1)
+                img2 = transforms.Resize(512)(img2)
+                img2 = transforms.CenterCrop(512)(img2)
+
+                # appliquer fovéation + post_process
+                level = np.random.randint(4)
+                img1 = self.fovea_transform(img1, level=level)
+                img1 = self.post_process(img1)
+                img2 = self.fovea_transform(img2)
+                img2 = self.post_process(img2)
+
+                return img1, img2, shift
+
+            except (OSError, IOError) as e:
+                print(f"[Dataset] Erreur accès idx={idx}, tentative {attempt+1}/{max_retries} : {e}")
+                idx = random.randint(0, len(self) - 1)
+
+        raise RuntimeError(f"Impossible de charger un exemple après {max_retries} tentatives.")
+    
 
 
 
-def make_dataloader(root, shiftzoom_transform, fovea_transform, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
-    dataset = FoveatedUpletDataset(
+
+def make_dataloader(root, zoom, std, start_center=True, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
+    dataset = FoveatedPairDataset(
         root=root,
-        shiftzoom_transform=shiftzoom_transform,
-        fovea_transform=fovea_transform,
+        zoom=zoom,
+        std=std,
+        start_center=start_center, 
         limit=limit
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)

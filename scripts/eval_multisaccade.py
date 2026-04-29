@@ -147,7 +147,6 @@ print("⚠️ Paramètres inattendus :", unexpected)
 linear_head.to(device)
 linear_head.eval()
 
-#c = input('continuer?')
 
 # %%
 from tqdm import tqdm
@@ -164,15 +163,13 @@ val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
 
 with torch.no_grad():
 
-    uplet_tf = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_views)
-
-
     val_dataset = FoveatedUpletDataset(
                     root              = val_dataset_raw,
-                    shift_zoom_uplet  = uplet_tf,
-                    output_size       = 128,
-                    resize            = 512,
-                    crop              = 512,
+                    zoom=zoom,
+                    std=std,
+                    n_uplet=n_views,
+                    start_center=False, 
+                    output_size       = 128
                 )
 
 

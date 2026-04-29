@@ -75,6 +75,8 @@ def main():
         std_min      = cfg["training"]["std_min"],
         std_max      = cfg["training"]["std_max"],
         resolution   = cfg["model"]["mosaic_size"],
+        start_center = True,
+        layernorm    = False,
         train_dir    = cfg["data"]["train_dir"],
         val_dir      = cfg["data"]["val_dir"],
         batch_size   = cfg["training"]["batch_size"],

@@ -9,7 +9,7 @@ training:
   ema_momentum: 0.9999
   std_min:      0.1
   std_max:      0.5
-  save_dir:     ./checkpoints_teacher_student
+  save_dir:     ../checkpoints/checkpoints_teacher_student
 
 model:
   student:

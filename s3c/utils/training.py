@@ -80,6 +80,8 @@ def train_teacher_student_Xattn(
     std_min,
     std_max,
     resolution=128,
+    start_center = True,
+    layernorm    = False,
     train_dir="",
     val_dir="",
     batch_size=32,
@@ -90,7 +92,7 @@ def train_teacher_student_Xattn(
     ema_momentum=0.999,
     alpha=0.3,
     lambda_sparse=1e-2,
-    save_dir="./checkpoints_teacher_student",
+    save_dir="../checkpoints/checkpoints_teacher_student",
     resume_epoch=0,       # resume from crash
     resume_batch=0,       # 
     resume_checkpoint=None  # 
@@ -99,7 +101,8 @@ def train_teacher_student_Xattn(
 
     dino_student_y = StudentWithYPredictor(deepcopy(dino_model)).to(device)
     dino_teacher = deepcopy(dino_model).to(device)
-    dino_teacher.norm = nn.Identity()
+    if not layernorm:
+        dino_teacher.norm = nn.Identity()
     for p in dino_teacher.parameters():
         p.requires_grad = False
 
@@ -115,9 +118,6 @@ def train_teacher_student_Xattn(
     )
 
     scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
-
-    fovea_transform = FoveatedPyramidTransform(output_size=resolution)
-
 
     # --- Chargement du checkpoint ---
     if resume_checkpoint is not None:
@@ -155,8 +155,8 @@ def train_teacher_student_Xattn(
         mult = (1 - 0.95 ** epoch) / (1 - 0.95 ** (epochs - 1))
         std = std_min + mult * (std_max - std_min)
 
-        train_loader = make_dataloader(train_dir, zoom, std, fovea_transform, batch_size=batch_size)
-        val_loader = make_dataloader(val_dir, zoom, std, fovea_transform, batch_size=batch_size)
+        train_loader = make_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size)
+        val_loader = make_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size)
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, (img1, img2, y_target) in enumerate(pbar):
@@ -175,7 +175,7 @@ def train_teacher_student_Xattn(
                 z1_target = dino_teacher.forward_features(img1)[:, 0, :]
                 z2 = dino_teacher.forward_features(img2)[:, 0, :]
 
-            z1, z2_pred = dino_student_y(img1, y_target, layernorm=False)
+            z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
 
             loss_align = criterion(z2_pred, z2.detach().clone())
             running_loss_1 += loss_align.item()
@@ -216,7 +216,7 @@ def train_teacher_student_Xattn(
                     for _ in range(5):
                         img1, img2, y_target = next(val_iter)
                         img1, img2, y_target = img1.to(device), img2.to(device), y_target.to(device)
-                        z1, z2_pred = dino_student_y(img1, y_target, layernorm=False)
+                        z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
                         z1_target = dino_teacher.forward_features(img1)[:, 0, :]
                         z2 = dino_teacher.forward_features(img2)[:, 0, :]
                         val_loss_1 += criterion(z2_pred, z2).item()
