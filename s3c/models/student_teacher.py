@@ -27,8 +27,8 @@ class ViTBlockWithYFull(nn.Module):
 
     def forward(self, x, y):
         """
-        x : [B, N, D]  image tokens
-        y : [B, 1, D]  y token
+        x : (B, N, D)   — image tokens
+        y : (B, K, D)   — K position tokens  (K=1 pour single view)
         """
 
         # ======================================================
@@ -71,10 +71,19 @@ class StudentWithYPredictor(nn.Module):
         self.y_proj = nn.Linear(2, vit.embed_dim, bias=False)
         nn.init.xavier_uniform_(self.y_proj.weight)  # Initialisation soignée
 
-        # ✅ norme spécifique pour le token Y
+        # norme spécifique pour le token Y
         self.norm_y = nn.LayerNorm(vit.embed_dim)
 
     def forward(self, x, y, layernorm=True):
+        """
+        x : (B, 3, H, W)
+        y : (B, 2)        → single view   — comportement single view
+            (B, K, 2)     → K views       — prédit K vues simultanément
+        
+        Retourne :
+            z_img  : (B, D)        — CLS token image
+            z_pred : (B, D)        ou (B, K, D)  selon l'entrée
+        """
         B = x.shape[0]
 
         # ---- tokens image ----
@@ -83,8 +92,13 @@ class StudentWithYPredictor(nn.Module):
         x = torch.cat([cls, x], dim=1)
         x = x + self.pos_embed
 
-        # ---- token Y ----
-        y = self.y_proj(y).unsqueeze(1)  # [B,1,D]
+        # ── token(s) Y ───────────────────────────────────────────────────
+        single = y.dim() == 2                   # True si (B, 2), False si (B, K, 2)
+        if single:
+            y = y.unsqueeze(1)                  # (B, 1, 2)
+
+        # y_proj s'applique sur la dernière dim → fonctionne pour (B, K, 2)
+        y = self.y_proj(y)                      # (B, K, D)
 
         for blk in self.blocks:
             x, y = blk(x, y)
@@ -93,7 +107,9 @@ class StudentWithYPredictor(nn.Module):
             x = self.norm(x)
             y = self.norm_y(y)
 
-        return x[:, 0], y.squeeze(1)
+        z_pred = y.squeeze(1) if single else y  # (B,D) ou (B,K,D)
+
+        return x[:, 0], z_pred
 
 
 @torch.no_grad()
