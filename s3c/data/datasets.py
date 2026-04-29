@@ -178,7 +178,7 @@ class FoveatedPairDataset(Dataset):
 
 
 
-def make_dataloader(root, zoom, std, start_center=True, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
+def make_pair_dataloader(root, zoom, std, start_center=True, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
     dataset = FoveatedPairDataset(
         root=root,
         zoom=zoom,

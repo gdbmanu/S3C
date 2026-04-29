@@ -9,8 +9,7 @@ from tqdm import tqdm
 import pandas as pd
 
 from s3c.models.student_teacher import StudentWithYPredictor, update_ema_student_teacher
-from s3c.data.transforms import FoveatedPyramidTransform
-from s3c.data.datasets import make_dataloader
+from s3c.data.datasets import make_pair_dataloader
 
 from torch.optim.lr_scheduler import LinearLR
 
@@ -155,8 +154,8 @@ def train_teacher_student_Xattn(
         mult = (1 - 0.95 ** epoch) / (1 - 0.95 ** (epochs - 1))
         std = std_min + mult * (std_max - std_min)
 
-        train_loader = make_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size)
-        val_loader = make_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size)
+        train_loader = make_pair_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size)
+        val_loader = make_pair_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size)
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, (img1, img2, y_target) in enumerate(pbar):
