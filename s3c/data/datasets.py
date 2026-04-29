@@ -42,15 +42,9 @@ import random
         return len(self.base_dataset)"""
 
 class FoveatedUpletDataset(torch.utils.data.Dataset):
-    """
-    Pipeline complet :
-      1. Resize + CenterCrop sur l'image brute  (une fois)
-      2. ShiftZoomUplet → n_uplet vues PIL       (par vue)
-      3. FoveatedPyramidTransform                (par vue)
-      4. ToTensor + Normalize                    (par vue)
-    """
+   
     def __init__(self,
-                 root,           # ImageFolder SANS transform (ou transform=None)
+                 root,           # ImageFolder 
                  zoom, 
                  std,
                  n_uplet,
@@ -68,7 +62,8 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
         #])
 
         # ── post-traitement par vue ──────────────────────────────────────
-        self.fov       = FoveatedPyramidTransform(output_size=output_size)
+        self.fovea_transform       = FoveatedPyramidTransform(output_size=output_size)
+
         self.post_process = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -91,12 +86,12 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
             view = transforms.CenterCrop(512)(view)
 
             # 3. Mosaïque fovéale
-            view = self.fov(view)           # PIL 128×128
+            fov_view = self.fovea_transform(view)           # PIL 128×128
 
             # 4. ToTensor + Normalize
-            view = self.post_process(view)
+            fov_view = self.post_process(fov_view)
 
-            fov_views.append(view)
+            fov_views.append(fov_view)
             sxs.append(sx)
             sys_.append(sy)
             zooms.append(zoom)
@@ -119,7 +114,6 @@ class FoveatedPairDataset(Dataset):
                  std, 
                  output_size=128,
                  start_center=True, 
-                 preprocess=None, 
                  limit=None):
         #self.pre_process = transforms.Compose([
         #    transforms.Resize(resize),
