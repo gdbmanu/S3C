@@ -64,14 +64,6 @@ class StudentWithYPredictor(nn.Module):
         self.cls_token = vit.cls_token
         self.pos_embed = vit.pos_embed
         self.norm = vit.norm
-
-        """num_y_blocks = 6
-        blocks = vit.blocks
-        self.blocks = nn.ModuleList([
-            ViTBlockWithYShared(blk, enable_y=(i >= len(blocks) - num_y_blocks))
-            for i, blk in enumerate(blocks)
-        ])"""
-
         self.blocks = nn.ModuleList([
             ViTBlockWithYFull(blk) for blk in vit.blocks
         ])
