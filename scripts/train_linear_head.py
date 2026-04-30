@@ -22,7 +22,7 @@ import timm
 
 from s3c.models.foveated_vit import FoveatedMultiViT, build_foveated_pos_embed
 from s3c.data.transforms import ShiftZoomUplet, FoveatedPyramidTransform
-from s3c.data.datasets import FoveatedUpletDataset
+from s3c.data.datasets import FoveatedUpletDataset, make_dataloader
 
 from PIL import Image
 
@@ -30,7 +30,6 @@ from tqdm import tqdm
 
 
 # --- Configuration générale ---
-# data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
 batch_size = 256
 num_workers = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,25 +38,26 @@ resolution = 128
 embed_dim = 768
 
 # Monter le dossier distant
+local=True
+if local == False:
+    mount_point = os.path.expanduser("~/imagenet_mount")
 
-mount_point = os.path.expanduser("~/imagenet_mount")
-try:
-    os.makedirs(mount_point, exist_ok=True)
-    subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
-except:
-    pass
+    try:
+        os.makedirs(mount_point, exist_ok=True)
+        subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
+    except:
+        pass
 
+    # Ton code ici, en utilisant mount_point
+    train_dir = os.path.join(mount_point, "train")
+    val_dir = os.path.join(mount_point, "val")
+else:
+    train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
+    val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
 
-train_dir = os.path.join(mount_point, "train")
-val_dir = os.path.join(mount_point, "val")
+load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-
-# train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
-# val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
-
-load_dir = "../checkpoints/checkpoints_EMA_Xattn_260321"
-
-save_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_linear_head"
+save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_linear_head"
 #save_dir = "./checkpoints_260414_base_1_view"
 
 
@@ -122,45 +122,8 @@ for param in model.parameters():
 train_dataset_raw   = datasets.ImageFolder(train_dir, transform=None)
 val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
 
-train_dataset = FoveatedUpletDataset(
-                base_dataset      = train_dataset_raw,
-                zoom=zoom,
-                std=std,
-                n_uplet=n_uplet,
-                start_center=False, 
-                output_size       = 128
-            )
-
-val_dataset = FoveatedUpletDataset(
-                base_dataset      = val_dataset_raw,
-                zoom=zoom,
-                std=std,
-                n_uplet=n_uplet,
-                start_center=False, 
-                output_size       = 128
-            )
-
-
-#train_loader = make_dataloader(train_dataset_raw, shiftzoom_transform, fovea_transform, batch_size=batch_size) #, limit=500)
-
-#val_loader = make_dataloader(train_dataset_raw, shiftzoom_transform, fovea_transform, batch_size=batch_size) #, limit=batch_size*5)
-
-train_loader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_size  = batch_size,
-                shuffle     = True,
-                num_workers = num_workers,
-                #pin_memory  = True,
-            )
-
-val_loader = torch.utils.data.DataLoader(
-                val_dataset,
-                batch_size  = batch_size,
-                shuffle     = True,
-                num_workers = num_workers,
-                #pin_memory  = True,
-            )
-
+train_loader = make_dataloader(train_dataset_raw, zoom, std, n_uplet, batch_size=batch_size, num_workers=num_workers, limit=None)
+val_loader = make_dataloader(val_dataset_raw, zoom, std, n_uplet, batch_size=batch_size, num_workers=num_workers, limit=None)
 
 
 # Définir la tête linéaire

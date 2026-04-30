@@ -14,7 +14,7 @@ import torch.nn as nn
 from torchvision import datasets
 
 from s3c.models.foveated_vit import build_foveated_pos_embed, FoveatedMultiViT
-from s3c.data.datasets import ShiftZoomUplet, FoveatedUpletDataset
+from s3c.data.datasets import make_dataloader
 
 import timm
 
@@ -163,23 +163,8 @@ val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
 
 with torch.no_grad():
 
-    val_dataset = FoveatedUpletDataset(
-                    root              = val_dataset_raw,
-                    zoom=zoom,
-                    std=std,
-                    n_uplet=n_views,
-                    start_center=False, 
-                    output_size       = 128
-                )
+    val_loader = make_dataloader(val_dataset_raw, zoom, std, n_views, batch_size=batch_size, num_workers=num_workers, limit=None)
 
-
-    val_loader = torch.utils.data.DataLoader(
-                    val_dataset,
-                    batch_size  = batch_size,
-                    shuffle     = True,
-                    num_workers = num_workers,
-                    #pin_memory  = True,
-                )
 
     total = 0
     correct = np.zeros(n_views)

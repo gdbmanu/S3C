@@ -2,46 +2,61 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class FoveatedMultiViT(nn.Module):
-    """
-    ViT fovéal avec support multi-vues.
 
-    Mode single  (n_views=1) 
-    Mode multi   (n_views>1) : les patches de toutes les vues sont
-                               concaténés sur la dim token, avec un
-                               seul CLS token qui agrège via attention.
-    """
+class FoveatedMultiViT(nn.Module):
     def __init__(self, model):
         super().__init__()
-        self.model   = model
+        self.model = model
         self.model.pos_embed.requires_grad_(False)
 
-    # ------------------------------------------------------------------ #
-    #  Forward mono-vue (inchangé, gardé pour compatibilité)              #
-    # ------------------------------------------------------------------ #
     def forward_single(self, x):
-        """x : (B, 3, H, W)"""
-        B = x.shape[0]
-        x   = self.model.patch_embed(x)                      # (B, N, D)
-        cls = self.model.cls_token.expand(B, -1, -1)         # (B, 1, D)
-        x   = torch.cat([cls, x], dim=1)                     # (B, 1+N, D)
-        x   = x + self.model.pos_embed # pos
+        """x : (B, 3, H, W) → (B, 1+N, D)"""
+        B   = x.shape[0]
+        x   = self.model.patch_embed(x)
+        cls = self.model.cls_token.expand(B, -1, -1)
+        x   = torch.cat([cls, x], dim=1)
+        x   = x + self.model.pos_embed
         x   = self.model.pos_drop(x)
         x   = self.model.blocks(x)
-        x   = self.model.norm(x) 
-        return x                                              # (B, 1+N, D)
+        x   = self.model.norm(x)
+        return x                                        # (B, 1+N, D)
 
-    # ------------------------------------------------------------------ #
-    #  Forward multi-vues                                                 #
-    # ------------------------------------------------------------------ #
+    def forward_multi(self, views):
+        """
+        mosaics : (B, V, 3, H, W)
+        Retourne : (B, V, 1+N, D)
+          chaque vue est traitée indépendamment
+          → un CLS token par vue
+        """
+        B, V, C, H, W = views.shape
 
-    def forward_multi(self, mosaics):
-        B, V, C, H, W = mosaics.shape
+        # ── agréger V sur la dim batch → traitement indépendant par vue ──
+        x = views.view(B * V, C, H, W)           # (B*V, 3, H, W)
+
+        # forward complet — identique à forward_single
+        x = self.model.patch_embed(x)               # (B*V, N, D)
+        N = x.shape[1]
+        D = x.shape[2]
+
+        cls = self.model.cls_token.expand(B*V, -1, -1)  # (B*V, 1, D)
+        x   = torch.cat([cls, x], dim=1)            # (B*V, 1+N, D)
+        x   = x + self.model.pos_embed              # (B*V, 1+N, D)
+        x   = self.model.pos_drop(x)
+        x   = self.model.blocks(x)
+        x   = self.model.norm(x)                    # (B*V, 1+N, D)
+
+        # ── reshape pour retrouver la dimension vue ───────────────────────
+        x = x.view(B, V, 1 + N, D)
+        return x[:, :, 0, :]                        # (B, V, D) CLS tokens only
+       
+    
+    def forward_multi_embeddings(self, views): # old version (to be recycled)
+        B, V, C, H, W = views.shape
         D = self.model.embed_dim
 
         # 1. Patch embedding
         p_all = self.model.patch_embed(
-            mosaics.view(B * V, C, H, W)
+            views.view(B * V, C, H, W)
         ).view(B, V, -1, D)                                      # (B, V, N, D)
         N = p_all.shape[2]
 
@@ -67,15 +82,10 @@ class FoveatedMultiViT(nn.Module):
         x = self.model.norm(x)
         return x                                                  # (B, 1+V*N, D)
 
-    def forward(self, mosaics):
-        """
-        Interface unifiée.
-        mosaics peut être (B, 3, H, W)  → single view
-                       ou (B, V, 3, H, W) → multi views
-        """
-        if mosaics.dim() == 4:
-            return self.forward_single(mosaics)
-        return self.forward_multi(mosaics)
+    def forward(self, views, *args, **kwargs):
+        if views.dim() == 4:
+            return self.forward_single(views)
+        return self.forward_multi(views)
     
 def build_foveated_pos_embed(model,
                             base_img_size=224,

@@ -50,6 +50,7 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
                  n_uplet,
                  output_size   = 128,
                  start_center=False, 
+                 limit=None
                  ):
         
         self.base    = root
@@ -69,6 +70,9 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std =[0.229, 0.224, 0.225])
         ])
+
+        if limit:
+            self.base_dataset.samples = self.base_dataset.samples[:limit]
 
     def __getitem__(self, idx):
         img, label = self.base[idx]          # img = PIL brute
@@ -178,7 +182,7 @@ def make_dataloader(root, zoom, std, n_views, batch_size=32, num_workers=4, limi
         root=root,
         zoom=zoom,
         std=std,
-        n_views=n_views,
+        n_uplet=n_views,
         limit=limit
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
