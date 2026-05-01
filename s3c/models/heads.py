@@ -39,3 +39,70 @@ class DualPredictor(nn.Module):
         x = torch.cat([z1, z2], dim=-1)
         x = self.net(x)
         return self.shift_head(x), self.label_head(x)
+    
+
+class MAB(nn.Module):
+    """Multihead Attention Block"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_heads, 
+                                           dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, Q, K):
+        # Q attends to K
+        attn_out, _ = self.attn(Q, K, K)
+        Q = self.norm1(Q + attn_out)
+        Q = self.norm2(Q + self.ffn(Q))
+        return Q
+    
+class PMA(nn.Module):
+    """Pooling by Multihead Attention — k seed vectors"""
+    def __init__(self, d_model, n_heads, k=1, dropout=0.1):
+        super().__init__()
+        self.S = nn.Parameter(torch.randn(1, k, d_model))
+        self.mab = MAB(d_model, n_heads, dropout)
+
+    def forward(self, X):
+        B = X.size(0)
+        S = self.S.expand(B, -1, -1)        # (B, k, d_model)
+        return self.mab(S, X)               # (B, k, d_model)
+    
+class SAB(nn.Module):
+    """Set Attention Block — full O(n²) attention, fine for small n"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.mab = MAB(d_model, n_heads, dropout)
+
+    def forward(self, X):
+        return self.mab(X, X)  # self-attention sur l'ensemble
+
+
+class FovealSetTransformer(nn.Module):
+    def __init__(self, input_dim=768, 
+                 n_heads=8, n_sab=2, n_classes=1000, dropout=0.1):
+        super().__init__()
+        
+        self.encoder = nn.ModuleList([
+            SAB(input_dim, n_heads, dropout) for _ in range(n_sab)
+        ])
+        self.pma = PMA(input_dim, n_heads, k=1, dropout=dropout)
+        self.head = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, n_classes),
+        )
+
+    def forward(self, x):
+        # X: (B, n, 768), n entre 2 et 15
+        for sab in self.encoder:
+            x = sab(x)
+        x = self.pma(x).squeeze(1)
+        return self.head(x)

@@ -4,10 +4,11 @@ import torch.nn.functional as F
 
 
 class FoveatedMultiViT(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, norm=True):
         super().__init__()
         self.model = model
         self.model.pos_embed.requires_grad_(False)
+        self.norm = norm
 
     def forward_single(self, x):
         """x : (B, 3, H, W) → (B, 1+N, D)"""
@@ -43,7 +44,8 @@ class FoveatedMultiViT(nn.Module):
         x   = x + self.model.pos_embed              # (B*V, 1+N, D)
         x   = self.model.pos_drop(x)
         x   = self.model.blocks(x)
-        x   = self.model.norm(x)                    # (B*V, 1+N, D)
+        if self.norm:
+            x   = self.model.norm(x)                    # (B*V, 1+N, D)
 
         # ── reshape pour retrouver la dimension vue ───────────────────────
         x = x.view(B, V, 1 + N, D)
@@ -79,7 +81,8 @@ class FoveatedMultiViT(nn.Module):
         # 6. Transformer
         x = self.model.pos_drop(x)
         x = self.model.blocks(x)
-        x = self.model.norm(x)
+        if self.norm:
+            x = self.model.norm(x)
         return x                                                  # (B, 1+V*N, D)
 
     def forward(self, views, *args, **kwargs):
