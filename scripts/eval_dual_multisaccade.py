@@ -33,22 +33,24 @@ resolution = 128
 embed_dim = 768
 
 # Monter le dossier distant
+local=True
 
-mount_point = os.path.expanduser("~/imagenet_mount")
+if not local:
+    mount_point = os.path.expanduser("~/imagenet_mount")
 
-try:
-    os.makedirs(mount_point, exist_ok=True)
-    subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
-except:
-    pass
+    try:
+        os.makedirs(mount_point, exist_ok=True)
+        subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
+    except:
+        pass
 
-# Ton code ici, en utilisant mount_point
-train_dir = os.path.join(mount_point, "train")
-val_dir = os.path.join(mount_point, "val")
+    # Ton code ici, en utilisant mount_point
+    train_dir = os.path.join(mount_point, "train")
+    val_dir = os.path.join(mount_point, "val")
+else:
 
-
-# train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
-# val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
+    train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
+    val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
@@ -66,10 +68,8 @@ n_views = 10
 
 zoom = 1.5
 
-save_dir = "../checkpoints/checkpoints_260427"
-#save_dir = "./checkpoints_260319_base_1_view"
+save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_dual"
 
-zoom = 1.5
 
 std = 0.5 / zoom
 
