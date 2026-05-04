@@ -33,7 +33,7 @@ resolution = 128
 embed_dim = 768
 
 # Monter le dossier distant
-local=True
+local=False
 
 if not local:
     mount_point = os.path.expanduser("~/imagenet_mount")
@@ -141,12 +141,6 @@ dual_predictor.eval()
 # %%
 from tqdm import tqdm
 
-
-os.makedirs(save_dir, exist_ok=True)
-
-history = {"n_saccades": [], 
-            "classif": []}
-
 os.makedirs(save_dir, exist_ok=True)
 
 val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
@@ -181,13 +175,16 @@ with torch.no_grad():
 
         total += labels.size(0)
 
-    for i in range(n_views):
-        history["n_saccades"].append(i + 1)
-        print(f"Top-1 accuracy: {100 * correct[i] / total:.2f}%")
-        history["classif"].append(100 * correct[i] / total)
+        history = {"n_saccades": [], 
+            "classif": []}
 
-    df = pd.DataFrame(history)
-    df.to_csv(os.path.join(save_dir, "training_log_multi.csv"), index=False)        
+        for i in range(n_views):
+            history["n_saccades"].append(i + 1)
+            print(f"Top-1 accuracy: {100 * correct[i] / total:.2f}%")
+            history["classif"].append(100 * correct[i] / total)
+
+        df = pd.DataFrame(history)
+        df.to_csv(os.path.join(save_dir, "training_log_multi.csv"), index=False)        
 
 # Démonter le dossier à la fin
 subprocess.run(["fusermount", "-u", mount_point], check=True)
