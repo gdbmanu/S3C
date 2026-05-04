@@ -71,7 +71,7 @@ n_saccades_max = 20
 
 zoom = 1.5
 
-std = 0.3 
+std = 0.5 / zoom 
 
 n_uplet = 3
 
@@ -228,6 +228,8 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
 
         if (batch_idx + 1) % log_interval == 0:
 
+            triple_predictor.eval()
+
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
 
             history["epoch"].append(epoch + 1)
@@ -282,7 +284,9 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
                 },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
             
             df = pd.DataFrame(history)
-            df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)        
+            df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
+
+            triple_predictor.train()
 
     scheduler.step()
 
