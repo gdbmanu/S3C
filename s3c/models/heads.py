@@ -69,6 +69,30 @@ class TriplePredictor(nn.Module):
         x_sum = x1 + x2 + x3
         return self.shift_head(x1), self.shift_head(x2), self.shift_head(x3), self.label_head(self.norm(x_sum))
     
+class TrianglePredictor(nn.Module):
+    def __init__(self, emb_dim=768, hidden_dim=384):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3 * emb_dim, 6 * emb_dim),
+            nn.ReLU(),
+            nn.Linear(6 * emb_dim, 3 * emb_dim),
+            nn.ReLU(),
+        )
+
+        self.triangle_head = nn.Sequential(
+            nn.Linear(3 * emb_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3)  # sortie (dx, dy)
+        )
+
+        self.norm = nn.LayerNorm()
+        self.label_head = nn.Linear(2 * emb_dim, 1000)
+            
+    def forward(self, z1, z2, z3):
+        x = torch.cat([z1, z2, z3], dim=-1)
+        x = self.net(x)
+        return self.triangle_head(x), self.label_head(self.norm(x))
+    
 
 class MAB(nn.Module):
     """Multihead Attention Block"""

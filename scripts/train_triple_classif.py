@@ -211,7 +211,7 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
         with torch.cuda.amp.autocast():
             shift1 = torch.stack([sxs[:,1] - sxs[:,0], sys_[:,1] - sys_[:,0]], dim=1)
             shift2 = torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1)
-            shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,1]], dim=1)
+            shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1)
             with torch.no_grad():
                 features = model(views)  # Extraction des features
             pred_shift1, pred_shift2, pred_shift3, output = triple_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
@@ -255,7 +255,7 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
 
                     shift1 = torch.stack([sxs[:,1] - sxs[:,0], sys_[:,1] - sys_[:,0]], dim=1)
                     shift2 = torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1)
-                    shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,1]], dim=1)
+                    shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1)
                     features = model(views)  # Extraction des features
                     pred_shift1, pred_shift2, pred_shift3, output = triple_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
 
