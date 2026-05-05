@@ -60,10 +60,7 @@ else:
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-dual_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_dual"
-
-save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_triple"
-
+save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_triangle"
 
 epoch_teacher = 20
 
@@ -133,7 +130,7 @@ train_loader = make_dataloader(train_dataset_raw, zoom, std, n_uplet, batch_size
 val_loader = make_dataloader(val_dataset_raw, zoom, std, n_uplet, batch_size=batch_size, num_workers=num_workers, limit=None)
 
 # Définir la tête duale
-triangle_predictor = TrianglePredictor(model_orig.embed_dim, 256)
+triangle_predictor = TrianglePredictor(model_orig.embed_dim, 384)
 
 triangle_predictor.to(device)
 triangle_predictor.train()
@@ -188,12 +185,12 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
         sys_    = sys_.to(device)
         labels   = labels.to(device)
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             side1 = torch.norm(torch.stack([sxs[:,1] - sxs[:,0], sys_[:,1] - sys_[:,0]], dim=1), dim=1)
             side2 = torch.norm(torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1), dim=1)
             side3 = torch.norm(torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1), dim=1)
             triangle = torch.stack([side1, side2, side3], dim=1)
-            with torch.no_grad():
+            with torch.inference_mode():
                 features = model(views)  # Extraction des features
             pred_triangle, output = triangle_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
             loss_triangle = mse(pred_triangle, triangle)
@@ -238,8 +235,9 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
                     side2 = torch.norm(torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1), dim=1)
                     side3 = torch.norm(torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1), dim=1)
                     triangle = torch.stack([side1, side2, side3], dim=1)
-                    features = model(views)  # Extraction des features
-                    pred_triangle, output = triangle_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
+                    with torch.inference_mode():
+                        features = model(views)  # Extraction des features
+                        pred_triangle, output = triangle_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
 
                     loss_triangle = mse(pred_triangle, triangle)
                     loss_label = criterion(output, labels)

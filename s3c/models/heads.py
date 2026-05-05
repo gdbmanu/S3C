@@ -85,8 +85,8 @@ class TrianglePredictor(nn.Module):
             nn.Linear(hidden_dim, 3)  # sortie (dx, dy)
         )
 
-        self.norm = nn.LayerNorm()
-        self.label_head = nn.Linear(2 * emb_dim, 1000)
+        self.norm = nn.LayerNorm(3 * emb_dim)
+        self.label_head = nn.Linear(3 * emb_dim, 1000)
             
     def forward(self, z1, z2, z3):
         x = torch.cat([z1, z2, z3], dim=-1)

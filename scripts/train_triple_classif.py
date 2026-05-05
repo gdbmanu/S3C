@@ -60,9 +60,9 @@ else:
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-dual_dir = "../checkpoints/checkpoints_260427_base_dual"
+dual_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_dual"
 
-save_dir = "../checkpoints/checkpoints_260427_base_triple"
+save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_triple"
 
 
 epoch_teacher = 20
@@ -98,7 +98,7 @@ build_foveated_pos_embed(model_orig,
 
 model = FoveatedMultiViT(model_orig)
 
-if False:
+if True:
     checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_teacher}.pt")  # exemple
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     # Vérifie les clés disponibles
@@ -208,11 +208,11 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
         sys_    = sys_.to(device)
         labels   = labels.to(device)
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             shift1 = torch.stack([sxs[:,1] - sxs[:,0], sys_[:,1] - sys_[:,0]], dim=1)
             shift2 = torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1)
             shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1)
-            with torch.no_grad():
+            with torch.inference_mode():
                 features = model(views)  # Extraction des features
             pred_shift1, pred_shift2, pred_shift3, output = triple_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
             loss_shift = mse(pred_shift1, shift1) + mse(pred_shift2, shift2) + mse(pred_shift3, shift3)
@@ -256,8 +256,9 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
                     shift1 = torch.stack([sxs[:,1] - sxs[:,0], sys_[:,1] - sys_[:,0]], dim=1)
                     shift2 = torch.stack([sxs[:,2] - sxs[:,1], sys_[:,2] - sys_[:,1]], dim=1)
                     shift3 = torch.stack([sxs[:,0] - sxs[:,2], sys_[:,0] - sys_[:,2]], dim=1)
-                    features = model(views)  # Extraction des features
-                    pred_shift1, pred_shift2, pred_shift3, output = triple_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
+                    with torch.inference_mode():
+                        features = model(views)  # Extraction des features
+                        pred_shift1, pred_shift2, pred_shift3, output = triple_predictor(features[:, 0,:], features[:, 1,:], features[:, 2,:])
 
                     loss_shift = mse(pred_shift1, shift1) + mse(pred_shift2, shift2) + mse(pred_shift3, shift3)
                     loss_label = criterion(output, labels)
