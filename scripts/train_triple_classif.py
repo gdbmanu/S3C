@@ -60,9 +60,9 @@ else:
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-dual_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_dual"
+dual_dir = "../checkpoints/checkpoints_260427_base_dual"
 
-save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_triple"
+save_dir = "../checkpoints/checkpoints_260427_base_triple"
 
 
 epoch_teacher = 20
@@ -98,7 +98,7 @@ build_foveated_pos_embed(model_orig,
 
 model = FoveatedMultiViT(model_orig)
 
-if True:
+if False:
     checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_teacher}.pt")  # exemple
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     # Vérifie les clés disponibles

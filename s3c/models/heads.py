@@ -56,7 +56,7 @@ class TriplePredictor(nn.Module):
             nn.Linear(hidden_dim, 2)  # sortie (dx, dy)
         )
 
-        self.norm = nn.LayerNorm()
+        self.norm = nn.LayerNorm(2 * emb_dim)
         self.label_head = nn.Linear(2 * emb_dim, 1000)
             
     def forward(self, z1, z2, z3):
