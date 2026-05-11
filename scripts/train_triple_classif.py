@@ -165,7 +165,7 @@ os.makedirs(save_dir, exist_ok=True)
 
 optimizer = torch.optim.AdamW(
     triple_predictor.parameters(),
-    lr=1e-4,              #
+    lr=1e-6,              #
     weight_decay=1e-4, 
 )
 
@@ -174,13 +174,13 @@ scaler = torch.cuda.amp.GradScaler()
 criterion = nn.CrossEntropyLoss()
 mse = nn.MSELoss()
 
-# %%
-
 #scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs)
 
-warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
-scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
+schedule = False
+if schedule:
+    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
+    cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
 
 #mosaics, sxs, sys_, zooms, labels = next(iter(train_loader)) # TEST!
 #c = input('continuer?')
@@ -289,7 +289,8 @@ for epoch in range(train_epochs):  # 20-30 époques suffisent
 
             triple_predictor.train()
 
-    scheduler.step()
+    if schedule:
+        scheduler.step()
 
 # Démonter le dossier à la fin
 subprocess.run(["fusermount", "-u", mount_point], check=True)

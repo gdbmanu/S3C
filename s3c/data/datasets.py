@@ -8,6 +8,9 @@ import numpy as np
 
 import random
 
+from pathlib import Path
+
+
 
 """class FoveatedUpletDataset(Dataset):
     def __init__(self, root, shiftzoom_transform, fovea_transform,  preprocess=None, limit=None):
@@ -50,7 +53,8 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
                  n_uplet,
                  output_size   = 128,
                  start_center=False, 
-                 limit=None
+                 limit=None,
+                 path=False
                  ):
         
         self.base    = root
@@ -74,8 +78,17 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
         if limit:
             self.base_dataset.samples = self.base_dataset.samples[:limit]
 
+        self.path = path
+        if path:
+            self.path_root = Path(root)
+
+
     def __getitem__(self, idx):
         img, label = self.base[idx]          # img = PIL brute
+        if self.path:
+            path_info, _ = self.base.samples[idx]
+            print('Path info:', path_info)
+            rel_path    = Path(path_info).relative_to(self.path_root)
 
         # 1. Resize / crop (une seule fois)
         # img = self.pre(img)                  # PIL 512×512
@@ -99,14 +112,23 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
             sxs.append(sx)
             sys_.append(sy)
             zooms.append(zoom)
-
-        return (
-            torch.stack(fov_views),                          # (V, 3, 128, 128)
-            torch.tensor(sxs,   dtype=torch.float32),      # (V,)
-            torch.tensor(sys_,  dtype=torch.float32),      # (V,)
-            torch.tensor(zooms, dtype=torch.float32),      # (V,)
-            label,
-        )
+        if not self.path:
+            return (
+                torch.stack(fov_views),                          # (V, 3, 128, 128)
+                torch.tensor(sxs,   dtype=torch.float32),      # (V,)
+                torch.tensor(sys_,  dtype=torch.float32),      # (V,)
+                torch.tensor(zooms, dtype=torch.float32),      # (V,)
+                label,
+            )
+        else:
+            return (
+                torch.stack(fov_views),                          # (V, 3, 128, 128)
+                torch.tensor(sxs,   dtype=torch.float32),      # (V,)
+                torch.tensor(sys_,  dtype=torch.float32),      # (V,)
+                torch.tensor(zooms, dtype=torch.float32),      # (V,)
+                label,
+                str(rel_path)
+            )
 
     def __len__(self):
         return len(self.base)
