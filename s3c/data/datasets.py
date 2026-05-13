@@ -47,7 +47,7 @@ from pathlib import Path
 class FoveatedUpletDataset(torch.utils.data.Dataset):
    
     def __init__(self,
-                 root,           # ImageFolder 
+                 base_folder,           # ImageFolder 
                  zoom, 
                  std,
                  n_uplet,
@@ -57,7 +57,7 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
                  path=False
                  ):
         
-        self.base    = root
+        self.base    = base_folder
         self.shiftzoom_transform      = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet, start_center=start_center)
 
         # ── pré-traitement image brute (une fois par sample) ────────────
@@ -80,14 +80,14 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
 
         self.path = path
         if path:
-            self.path_root = Path(root)
+            self.path_root = Path(base_folder.root)
 
 
     def __getitem__(self, idx):
         img, label = self.base[idx]          # img = PIL brute
         if self.path:
             path_info, _ = self.base.samples[idx]
-            print('Path info:', path_info)
+            #print('Path info:', path_info)
             rel_path    = Path(path_info).relative_to(self.path_root)
 
         # 1. Resize / crop (une seule fois)
@@ -194,8 +194,34 @@ class FoveatedPairDataset(Dataset):
 
         raise RuntimeError(f"Impossible de charger un exemple après {max_retries} tentatives.")
     
+    
+class ImageNetZDataset(Dataset):
+    """
+    Charge les embeddings pré-calculés depuis imagenet_z/.
+    Retourne (z, label) avec z de shape (n_sac, D).
+    """
+    def __init__(self, root):
+        self.root    = Path(root)
+        self.samples = []
+        self.classes = sorted([d.name for d in self.root.iterdir()
+                                if d.is_dir()])
+        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
 
+        for cls in self.classes:
+            label = self.class_to_idx[cls]
+            for pt in (self.root / cls).glob("*.pt"):
+                self.samples.append((pt, label))
 
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        dict = torch.load(path, map_location="cpu") #.float()  # (n_sac, D)
+        zs = dict["zs"].float()
+        xs = dict["xs"].float()
+        ys = dict["ys"].float()
+        return zs, xs, ys, label
+
+    def __len__(self):
+        return len(self.samples)
 
 
 # %%

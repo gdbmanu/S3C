@@ -34,8 +34,8 @@ from tqdm import tqdm
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 128
-num_workers = 4
+batch_size = 56
+num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 resolution = 128
@@ -64,7 +64,7 @@ else:
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-save_dir = "~/data/Imagenet_Z"
+save_dir = "data/Imagenet_Z"
 
 epoch_teacher = 20
 
@@ -110,7 +110,6 @@ print("⚠️ Paramètres inattendus :", unexpected)
 
 model.model.norm = nn.Identity() # pas de normalisation en sortie !
 model.to(device)
-model.eval()
 
 # 2. Geler le backbone
 for param in model.parameters():
@@ -130,7 +129,7 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
     print(f"\n── Génération embeddings — {split} ──────────────────────────")
     
     dataset = FoveatedUpletDataset(
-        root=dataset_raw, # ImageFolder
+        base_folder=dataset_raw, # ImageFolder
         zoom=zoom,
         std=std,
         start_center=False, 
@@ -150,10 +149,8 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
     skipped  = 0
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() \
                 else torch.float16
-    
-    pbar = tqdm(loader, desc=f"Batch {batch_idx+1}/{len(loader)/batch_size}")
 
-    for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(pbar):
+    for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
         # imgs : (B, n_sac, 3, H, W)
         imgs = imgs.to(device)
 
@@ -184,42 +181,13 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
     print(f"  Terminé — {skipped} fichiers déjà existants ignorés.")
 
 
-# ── dataset pour charger les embeddings pré-calculés ─────────────────────
-class ImageNetZDataset(Dataset):
-    """
-    Charge les embeddings pré-calculés depuis imagenet_z/.
-    Retourne (z, label) avec z de shape (n_sac, D).
-    """
-    def __init__(self, root):
-        self.root    = Path(root)
-        self.samples = []
-        self.classes = sorted([d.name for d in self.root.iterdir()
-                                if d.is_dir()])
-        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
-
-        for cls in self.classes:
-            label = self.class_to_idx[cls]
-            for pt in (self.root / cls).glob("*.pt"):
-                self.samples.append((pt, label))
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        dict = torch.load(path, map_location="cpu") #.float()  # (n_sac, D)
-        zs = dict["zs"].float()
-        xs = dict["xs"].float()
-        ys = dict["ys"].float()
-        return zs, xs, ys, label
-
-    def __len__(self):
-        return len(self.samples)
-
 
  # ── lancement ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # charger modèle
 
     for split, dataset_raw in [("train", train_dataset_raw),
-                              ("val",   val_dataset_raw)]:
+                               ("val",   val_dataset_raw)]:
         generate_embeddings(
             model           = model,       # FoveatedMultiViT déjà chargé
             split           = split,
@@ -232,15 +200,5 @@ if __name__ == "__main__":
             num_workers     = num_workers,
             device          = device,
         )
-
-    # test du dataset de chargement
-    zs_train, xs_train, ys_train = ImageNetZDataset(f"{save_dir}/train")
-    zs_val, xs_val, ys_val = ImageNetZDataset(f"{save_dir}/val")
-    print(f"\nTrain : {len(zs_train)} embeddings")
-    print(f"Val   : {len(zs_val)} embeddings")
-
-    z, label = zs_train[0]
-    print(f"Shape embedding : {z.shape}")   # (n_uplet, 768)
-    print(f"Label           : {label}")      
 
 

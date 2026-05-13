@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from tqdm import tqdm
 
@@ -262,3 +263,104 @@ def train_teacher_student_Xattn(
 
     print(f"✅ Entraînement terminé.")
     return dino_student_y, dino_teacher, mlp, history
+
+
+class SIGReg(nn.Module):
+    """
+    Sketched Isotropic Gaussian Regularization (LeJEPA, Balestriero & LeCun 2025).
+
+    Pour chaque direction aléatoire w tirée sur la sphère unité :
+      - on projette les embeddings du batch : s = z @ w  →  (B,) scalaires
+      - on mesure l'écart entre la FCE empirique de s et celle de N(0,1)
+        via le test d'Epps-Pulley
+
+    Si la loss → 0, alors pour toute direction w, z@w ~ N(0,1),
+    ce qui implique par Cramér-Wold que z ~ N(0, I).
+    """
+    def __init__(self, n_projections=64, n_t_points=64):
+        super().__init__()
+        self.n_projections = n_projections
+        # Grille de points t fixe, partagée entre appels
+        # Plage [-4, 4] : capture bien la queue de N(0,1)
+        self.register_buffer(
+            't_grid',
+            torch.linspace(-4, 4, n_t_points)   # (T,)
+        )
+
+    def epps_pulley_1d(self, x):
+        """
+        Mesure l'écart entre la distribution de x et N(0,1).
+
+        x     : (B,) — une projection 1D des embeddings
+        return : scalaire ≥ 0, = 0 ssi x ~ N(0,1)
+
+        Fonction caractéristique empirique :
+          φ̂(t) = (1/B) Σ_j [cos(t·x_j) + i·sin(t·x_j)]
+
+        Cible théorique pour N(0,1) :
+          φ(t) = exp(-t²/2)  (réelle pure)
+
+        Loss = moyenne sur t de |φ̂(t) - φ(t)|²
+             = moyenne sur t de [(Re φ̂(t) - exp(-t²/2))² + (Im φ̂(t))²]
+        """
+        device = x.device
+        t = self.t_grid.to(device)                          # (T,)
+
+        # Produits t·x_j pour tous les couples (t, x_j)
+        # x : (B,)  →  x.unsqueeze(0) : (1, B)
+        # t : (T,)  →  t.unsqueeze(1) : (T, 1)
+        tx = t.unsqueeze(1) * x.unsqueeze(0)    # (T, B)
+
+        # Fonction caractéristique empirique
+        ecf_real = torch.cos(tx).mean(dim=1)    # (T,)  moyenne sur le batch
+        ecf_imag = torch.sin(tx).mean(dim=1)    # (T,)
+
+        # Cible théorique N(0,1)
+        cf_target = torch.exp(-0.5 * t ** 2)    # (T,)  réelle pure
+
+        # Écart quadratique moyen sur la grille de t
+        # partie réelle + partie imaginaire (qui devrait être ~0)
+        loss = ((ecf_real - cf_target) ** 2
+                + ecf_imag ** 2).mean()          # scalaire
+
+        return loss
+
+    def forward(self, z):
+        """
+        z : (B, d_model) — embeddings du batch (bruts, sans normalisation)
+        """
+        B, d = z.shape
+
+        # Directions de projection aléatoires uniformes sur la sphère S^{d-1}
+        # Propriété : si w ~ Uniforme(S^{d-1}) et z ~ N(0, I),
+        # alors w·z ~ N(0, 1)  — c'est exactement ce qu'on veut vérifier
+        device = z.device
+        W = torch.randn(d, int(self.n_projections), device=device,
+                        dtype=z.dtype)
+        W = F.normalize(W, dim=0)               # (d, n_proj) — colonnes unitaires
+
+        # Projections : chaque colonne est une variable scalaire pour le batch
+        projections = z @ W                     # (B, n_projections)
+
+        # Epps-Pulley sur chaque projection, moyenné
+        # Vectorisé : on traite toutes les projections d'un coup
+        # projections.T : (n_proj, B)
+        t = self.t_grid.to(device)                                      # (T,)
+        # tx[k, i, j] = t_i * proj_{k,j}
+        # projections.T : (n_proj, B)
+        # t              : (T,)
+        # → on veut (n_proj, T, B)
+        tx = t.view(1, -1, 1) * projections.T.unsqueeze(1)  # (n_proj, T, B)
+
+        ecf_real = torch.cos(tx).mean(dim=2)    # (n_proj, T)
+        ecf_imag = torch.sin(tx).mean(dim=2)    # (n_proj, T)
+
+        cf_target = torch.exp(-0.5 * t ** 2)    # (T,)
+
+        # Écart pour chaque projection et chaque point t
+        loss = ((ecf_real - cf_target.view(1, -1)) ** 2
+                + ecf_imag ** 2).mean()         # scalaire
+
+        return loss
+
+

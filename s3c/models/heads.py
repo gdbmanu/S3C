@@ -141,21 +141,26 @@ class SAB(nn.Module):
 
 class FovealSetTransformer(nn.Module):
     def __init__(self, input_dim=768, 
-                 n_heads=8, n_sab=2, n_classes=1000, dropout=0.1):
+                 n_heads=8, n_sab=2, n_classes=1000, dropout=0.1, predict=True):
         super().__init__()
         
         self.encoder = nn.ModuleList([
             SAB(input_dim, n_heads, dropout) for _ in range(n_sab)
         ])
         self.pma = PMA(input_dim, n_heads, k=1, dropout=dropout)
-        self.head = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, n_classes),
-        )
+        self.predict = predict
+        if predict:
+            self.head = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, n_classes),
+            )
 
     def forward(self, x):
         # X: (B, n, 768), n entre 2 et 15
         for sab in self.encoder:
             x = sab(x)
         x = self.pma(x).squeeze(1)
-        return self.head(x)
+        if self.predict:
+            return self.head(x)
+        else:
+            return x
