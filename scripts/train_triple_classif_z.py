@@ -82,7 +82,7 @@ val_loader = DataLoader(
 # Définir la tête triple
 triple_predictor = TriplePredictor(embed_dim, 256)
 
-if True:
+if False:
     checkpoint_path = os.path.join(dual_dir, f"checkpoint_epoch{train_epochs_head}.pt")  # exemple
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     # Vérifie les clés disponibles

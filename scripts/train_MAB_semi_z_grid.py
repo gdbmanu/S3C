@@ -41,10 +41,25 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 embed_dim = 768
 
-train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
-val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
+# Monter le dossier distant
+local=False
+if local == False:
+    mount_point = os.path.expanduser("~/imagenet_grid")
 
-save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_MAB_semi_z_sab4_h12_LeJ"
+    try:
+        os.makedirs(mount_point, exist_ok=True)
+        subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_grid_Z", mount_point, "-o", "reconnect"], check=True)
+    except:
+        pass
+
+    # Ton code ici, en utilisant mount_point
+    train_dir = os.path.join(mount_point, "train")
+    val_dir = os.path.join(mount_point, "val")
+else:
+    train_dir = "~/data/Imagenet_grid_Z/train"   # Imagenet Validation set
+    val_dir = "~/data/Imagenet_grid_Z/val"   # Imagenet Validation set
+
+save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_MAB_semi_z_h12_grid_LeJ"
 
 epoch_teacher = 20
 
@@ -53,7 +68,7 @@ zoom = 1.5
 
 std = 0.5 / zoom 
 
-n_saccades_max = 30
+n_saccades_max = 121
 n_uplet_student = 3
 n_uplet_teacher = 8
 
@@ -78,8 +93,8 @@ val_loader = DataLoader(
     )
 
 mab_transformer = FovealSetTransformer(input_dim=embed_dim, 
-                 #n_heads=4, n_sab=2, predict=False)
-                 n_heads=12, n_sab=4, predict=False)
+                 n_heads=12, n_sab=2, predict=False)
+                 #n_heads=12, n_sab=4, predict=False)
 mab_transformer.to(device)
 mab_transformer.train()
 
@@ -135,6 +150,9 @@ os.makedirs(save_dir, exist_ok=True)
 
 global_step = 0
 
+n_student_draws = 6
+n_teacher_draws = 2
+
 for epoch in range(train_epochs):  
 
     total_loss = 0
@@ -151,8 +169,8 @@ for epoch in range(train_epochs):
         
         batch_size, n = sxs.shape
         perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
-        idx_s = perms[:, :n_uplet_student]                                    # (batch_size, n_uplet_student)
-        idx_t = perms[:, n_uplet_student:n_uplet_student + n_uplet_teacher]   # (batch_size, n_uplet_teacher)
+        idx_s = perms[:, :n_uplet_student * n_student_draws]                                    # (batch_size, n_uplet_student)
+        idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
 
 
         # Sélectionne les 3 valeurs pour x, y et z
@@ -161,17 +179,25 @@ for epoch in range(train_epochs):
 
         #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            output_s = mab_transformer(features_s)
-            output_t = mab_transformer(features_t)
-            output_t_head = linear_head(output_t.detach())
+            output_s = torch.stack([mab_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+            output_t = torch.stack([mab_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
+            centers = output_t.mean(dim=0)
 
-            loss_jepa = mse(output_s, output_t)
-            loss_sigreg = sigreg(output_s.float(), global_step) + sigreg(output_t.float(), global_step)
+            loss_jepa = 0
+            loss_sigreg = 0
+            for i in range(n_student_draws):
+                #for j in range(n_teacher_draws):
+                #    loss_jepa += mse(output_s[i], output_t[j])
+                loss_jepa += mse(output_s[i], centers)
+                loss_sigreg += sigreg(output_s[i].float(), global_step) 
+            for i in range(n_teacher_draws):
+                loss_sigreg += sigreg(output_t[i].float(), global_step)
             global_step += 1
+
+            output_t_head = linear_head(centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
             loss_label = criterion(output_t_head, labels)
 
             loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
-
 
         optimizer.zero_grad()
         loss.backward()
@@ -206,32 +232,43 @@ for epoch in range(train_epochs):
             val_iter = iter(val_loader)
 
             with torch.no_grad():
-                for i in range(5):
+                for n_val in range(5):
                     features, sxs, sys_, labels = next(val_iter)
                     labels   = labels.to(device)
 
                     batch_size, n = sxs.shape
                     perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
-                    idx_s = perms[:, :n_uplet_student]                                    # (batch_size, n_uplet_student)
-                    idx_t = perms[:, n_uplet_student:n_uplet_student + n_uplet_teacher]   # (batch_size, n_uplet_teacher)
+                    idx_s = perms[:, :n_uplet_student * n_student_draws]                                    # (batch_size, n_uplet_student)
+                    idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
+
 
                     # Sélectionne les 3 valeurs pour x, y et z
                     features_s = features[torch.arange(batch_size).unsqueeze(1), idx_s, :].to(device)  # (batch_size, k, 768)
                     features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
 
-                    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                        output_s = mab_transformer(features_s)
-                        output_t = mab_transformer(features_t)
-                        output_t_head = linear_head(output_t)
+                    #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                        output_s = torch.stack([mab_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+                        output_t = torch.stack([mab_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
+                        centers = output_t.mean(dim=0)
 
-                        loss_jepa = mse(output_s, output_t.detach())
-                        loss_sigreg = sigreg(output_s.float(), global_step) + sigreg(output_t.float(), global_step)
+                        loss_jepa = 0
+                        loss_sigreg = 0
+                        for i in range(n_student_draws):
+                            #for j in range(n_teacher_draws):
+                            #    loss_jepa += mse(output_s[i], output_t[j])
+                            loss_jepa += mse(output_s[i], centers)
+                            loss_sigreg += sigreg(output_s[i].float(), global_step) 
+                        for i in range(n_teacher_draws):
+                            loss_sigreg += sigreg(output_t[i].float(), global_step)
                         global_step += 1
-                        loss_label = criterion(output_t_head.detach(), labels)
+
+                        output_t_head = linear_head(centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        loss_label = criterion(output_t_head, labels)
 
                         loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
-                        if i == 1:
+                        if n_val == 0:
                             ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                             print(f"ratio sigreg/jepa = {ratio:.2f}")
 

@@ -277,14 +277,14 @@ class SIGReg(nn.Module):
     Si la loss → 0, alors pour toute direction w, z@w ~ N(0,1),
     ce qui implique par Cramér-Wold que z ~ N(0, I).
     """
-    def __init__(self, n_projections=64, n_t_points=64):
+    def __init__(self, n_projections=256, n_t_points=17):
         super().__init__()
         self.n_projections = n_projections
         # Grille de points t fixe, partagée entre appels
         # Plage [-4, 4] : capture bien la queue de N(0,1)
         self.register_buffer(
             't_grid',
-            torch.linspace(-4, 4, n_t_points)   # (T,)
+            torch.linspace(-5, 5, n_t_points)   # (T,)
         )
 
     def epps_pulley_1d(self, x):
@@ -362,5 +362,43 @@ class SIGReg(nn.Module):
                 + ecf_imag ** 2).mean()         # scalaire
 
         return loss
+
+def sigreg(x, global_step, num_slices=256):
+    """
+    SIGReg — version single-GPU (LeJEPA officiel simplifié).
+    
+    x           : (N, D) embeddings float32
+    global_step : entier — seed pour synchroniser les projections
+                  entre context et target (même A pour les deux)
+    num_slices  : nombre de directions de projection (256 dans le papier)
+    """
+    N, D = x.shape
+
+    # ── 1. Directions de projection ───────────────────────────────────
+    # Seed fixé par global_step : même A si on appelle sigreg(x_c) 
+    # puis sigreg(x_t) au même step — cohérence entre les deux appels
+    g = torch.Generator(device=x.device)
+    g.manual_seed(global_step)
+    A = torch.randn(D, num_slices, generator=g, device=x.device,
+                    dtype=x.dtype)
+    A /= A.norm(p=2, dim=0)                    # colonnes unitaires
+
+    # ── 2. Points d'intégration et cible théorique ────────────────────
+    t      = torch.linspace(-5, 5, 17, device=x.device, dtype=x.dtype)
+    exp_f  = torch.exp(-0.5 * t ** 2)          # CF de N(0,1) + fenêtre gaussienne
+
+    # ── 3. Fonction caractéristique empirique ─────────────────────────
+    # x @ A  : (N, num_slices)      — projections scalaires
+    # .unsqueeze(2) * t : (N, num_slices, 17)  — produits t·projection
+    x_t = (x @ A).unsqueeze(2) * t             # (N, num_slices, 17)
+    ecf = torch.exp(1j * x_t).mean(dim=0)      # (num_slices, 17) — moyenne batch
+
+    # ── 4. Écart pondéré à la cible ───────────────────────────────────
+    err = (ecf - exp_f).abs().square() * exp_f  # (num_slices, 17)
+
+    # ── 5. Intégration par trapèzes, normalisée par N ─────────────────
+    loss = torch.trapezoid(err, t, dim=1) * N   # (num_slices,)
+
+    return loss.mean()                          # scalaire
 
 
