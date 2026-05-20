@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import datasets, transforms
 
-from s3c.data.transforms import ShiftZoomUplet, FoveatedPyramidTransform
+from s3c.data.transforms import ShiftZoomUplet, ShiftZoomGrid, FoveatedPyramidTransform
 
 import numpy as np
 
@@ -11,38 +11,6 @@ import random
 from pathlib import Path
 
 
-
-"""class FoveatedUpletDataset(Dataset):
-    def __init__(self, root, shiftzoom_transform, fovea_transform,  preprocess=None, limit=None):
-        self.base_dataset = datasets.ImageFolder(root, transform=None)
-        self.shiftzoom_transform = shiftzoom_transform
-        self.n_uplet = self.shiftzoom_transform.n_uplet
-        self.fovea_transform = fovea_transform
-        self.preprocess = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225])
-        ])
-        if limit:
-            self.base_dataset.samples = self.base_dataset.samples[:limit]
-
-    @torch.no_grad()
-    def __getitem__(self, idx):
-        img, y = self.base_dataset[idx]
-        imgs = self.shiftzoom_transform(img)
-
-        for i in range(self.n_uplet):
-            
-            imgs[i] = transforms.Resize(512)(imgs[i])
-            imgs[i] = transforms.CenterCrop(512)(imgs[i])
-
-            # appliquer fovéation + preprocess
-            imgs[i] = self.preprocess(self.fovea_transform(imgs[i]))
-            
-        return imgs, y
-
-    def __len__(self):
-        return len(self.base_dataset)"""
 
 class FoveatedUpletDataset(torch.utils.data.Dataset):
    
@@ -60,13 +28,6 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
         self.base    = base_folder
         self.shiftzoom_transform      = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet, start_center=start_center)
 
-        # ── pré-traitement image brute (une fois par sample) ────────────
-        #self.pre = transforms.Compose([
-        #    transforms.Resize(resize),
-        #    transforms.CenterCrop(crop),
-        #])
-
-        # ── post-traitement par vue ──────────────────────────────────────
         self.fovea_transform       = FoveatedPyramidTransform(output_size=output_size)
 
         self.post_process = transforms.Compose([
@@ -90,28 +51,21 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
             #print('Path info:', path_info)
             rel_path    = Path(path_info).relative_to(self.path_root)
 
-        # 1. Resize / crop (une seule fois)
-        # img = self.pre(img)                  # PIL 512×512
-
-        # 2. n_uplet vues shiftées/zoomées
         views = self.shiftzoom_transform(img)                 # liste de (view, sx, sy, zoom)
 
         fov_views, sxs, sys_, zooms = [], [], [], []
+        
         for view, sx, sy, zoom in views:
-
+            
             view = transforms.Resize(512)(view)
             view = transforms.CenterCrop(512)(view)
-
-            # 3. Mosaïque fovéale
             fov_view = self.fovea_transform(view)           # PIL 128×128
-
-            # 4. ToTensor + Normalize
             fov_view = self.post_process(fov_view)
-
             fov_views.append(fov_view)
             sxs.append(sx)
             sys_.append(sy)
             zooms.append(zoom)
+
         if not self.path:
             return (
                 torch.stack(fov_views),                          # (V, 3, 128, 128)
@@ -132,6 +86,28 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.base)
+
+class FoveatedGridDataset(FoveatedUpletDataset):
+    def __init__(self,
+                 base_folder,
+                 zoom,
+                 n_grid        = 11,
+                 output_size   = 128,
+                 limit         = None,
+                 path          = False
+                 ):
+        super().__init__(
+            base_folder  = base_folder,
+            zoom         = zoom,
+            std          = 0.0,
+            n_uplet      = n_grid * n_grid,
+            output_size  = output_size,
+            start_center = False,
+            limit        = limit,
+            path         = path,
+        )
+        # Remplace le ShiftZoomUplet aléatoire par la grille déterministe
+        self.shiftzoom_transform = ShiftZoomGrid(zoom=zoom, n_grid=n_grid)
     
 class FoveatedPairDataset(Dataset):
     def __init__(self, 
@@ -141,10 +117,6 @@ class FoveatedPairDataset(Dataset):
                  output_size=128,
                  start_center=True, 
                  limit=None):
-        #self.pre_process = transforms.Compose([
-        #    transforms.Resize(resize),
-        #    transforms.CenterCrop(crop),
-        #])
         self.base_dataset = datasets.ImageFolder(root, transform=None)
         self.shiftzoom_transform = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=2, start_center=start_center)
         self.fovea_transform       = FoveatedPyramidTransform(output_size=output_size)
@@ -163,8 +135,6 @@ class FoveatedPairDataset(Dataset):
             try:
                 img, _ = self.base_dataset[idx]
 
-                # pre-processing
-                #img = self.pre_process(img)                  # PIL 512×512
 
                 # 2 views only
                 views = self.shiftzoom_transform(img)

@@ -66,6 +66,23 @@ class ShiftZoomUplet:
             img_shifted = self.shift_zoom(img, sx, sy)
             views.append((img_shifted, sx, sy, self.zoom))  # ← tuple complet
         return views
+
+class ShiftZoomGrid(ShiftZoomUplet):
+    def __init__(self, zoom=1.5, n_grid=11):
+        # n_uplet = n_grid² mais on n'utilise pas le tirage aléatoire
+        super().__init__(zoom=zoom, std=0.0, n_uplet=n_grid * n_grid)
+        self.n_grid = n_grid
+        # Grille fixe de shifts entre -0.75 et 0.75
+        self.grid = torch.linspace(-0.75, 0.75, n_grid)
+
+    def __call__(self, img):
+        views = []
+        for y in self.grid:
+            for x in self.grid:
+                sx, sy = float(x), float(y)
+                img_shifted = self.shift_zoom(img, sx, sy)
+                views.append((img_shifted, sx, sy, self.zoom))
+        return views
     
 class FoveatedPyramidTransform:
     def __init__(self, output_size=128):
