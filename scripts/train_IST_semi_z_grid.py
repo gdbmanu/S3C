@@ -85,7 +85,7 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-n_sab = 4
+n_sab = 2
 k = 3
 n_heads = 12
 
@@ -96,7 +96,7 @@ n_student_draws = 6
 n_teacher_draws = 2
 
 train_epochs = 100
-lam=0.05           # λ : trade-off JEPA / SIGReg
+lam = 0.5           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
 supervised = False

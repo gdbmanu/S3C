@@ -205,7 +205,7 @@ class SeedBlock(nn.Module):
       - cross-attention seeds → vues (seeds lisent les vues transformées)
       - self-attention sur les seeds (seeds se coordonnent)
     """
-    def __init__(self, d_model, n_heads, dropout=0.1):
+    def __init__(self, d_model, n_heads, dropout=0.1, self_att=False):
         super().__init__()
 
         # Self-attention sur les vues
@@ -227,10 +227,13 @@ class SeedBlock(nn.Module):
         self.seed_norm1 = nn.LayerNorm(d_model)
 
         # Self-attention sur les seeds
-        self.seed_self_attn = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, batch_first=True
-        )
-        self.seed_norm2 = nn.LayerNorm(d_model)
+        self.self_att = self_att
+        if self_att:
+            self.seed_self_attn = nn.MultiheadAttention(
+                d_model, n_heads, dropout=dropout, batch_first=True
+            )
+            self.seed_norm2 = nn.LayerNorm(d_model)
+
         self.seed_ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model), nn.GELU(),
             nn.Dropout(dropout),
@@ -240,18 +243,25 @@ class SeedBlock(nn.Module):
 
     def forward(self, seeds, views):
         # ── 1. Vues se transforment entre elles ──────────────────────
-        h, _ = self.view_self_attn(views, views, views)
-        views = self.view_norm1(views + h)
-        views = self.view_norm2(views + self.view_ffn(views))
+
+        v = self.view_norm1(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        views = views + h_views
+        views = views + self.view_ffn(self.view_norm2(views))
 
         # ── 2. Seeds lisent les vues transformées ─────────────────────
-        h, _ = self.cross_attn(seeds, views, views)
-        seeds = self.seed_norm1(seeds + h)
+        s = self.seed_norm1(seeds)
+        h_seeds, _ = self.cross_attn(s, v, v)
+        seeds_1 = seeds + h_seeds 
 
         # ── 3. Seeds se coordonnent ───────────────────────────────────
-        h, _ = self.seed_self_attn(seeds, seeds, seeds)
-        seeds = self.seed_norm2(seeds + h)
-        seeds = self.seed_norm3(seeds + self.seed_ffn(seeds))
+        if self.self_att:
+            s1 = self.seed_norm2(seeds_1)
+            h_self, _ = self.seed_self_attn(s1, s1, s1)
+            seeds_2 = seeds_1 + h_self
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds_2))
+        else:
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds_1))
 
         return seeds, views   # les deux évoluent
 
