@@ -96,9 +96,11 @@ n_student_draws = 6
 n_teacher_draws = 2
 
 train_epochs = 100
-lam=1           # λ : trade-off JEPA / SIGReg
+lam=0.5           # λ : trade-off JEPA / SIGReg
 
-save_dir = f"../checkpoints/260522_IST{k}_semi_z_lam{lam}_sab{n_sab}_grid_LeJ"
+inv_temp = 1
+
+save_dir = f"../checkpoints/260522_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_SUP_TEST"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
@@ -106,12 +108,17 @@ ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_di
 ist_transformer.to(device)
 ist_transformer.train()
 
-linear_head = nn.Sequential(
-                nn.LayerNorm(k*embed_dim),
-                nn.Linear(k*embed_dim, 1000),
-            )
-linear_head.to(device)
-linear_head.train()
+attention = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )
+
+attention.to(device)
+attention.train()
+
+# LINEAR PROBES
 
 heads_per_seed = nn.ModuleList([
             nn.Sequential(
@@ -119,6 +126,15 @@ heads_per_seed = nn.ModuleList([
                 nn.Linear(embed_dim, 1000) 
             ) for _ in range(k)
         ])
+
+linear_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, 1000),
+            )
+
+linear_head.to(device)
+linear_head.train()
+
 heads_per_seed.to(device)
 heads_per_seed.train()
 
@@ -127,17 +143,32 @@ os.makedirs(save_dir, exist_ok=True)
 # Optimiseur
 #optimizer = torch.optim.SGD(linear_head.parameters(), lr=0.001, momentum=0.9)
 
-optimizer = torch.optim.AdamW(
+'''optimizer = torch.optim.AdamW(
     ist_transformer.parameters(),
     lr=3e-5,              #
     weight_decay=1e-3, #0.04,  
-)
+)'''
 
-linear_optimizer = torch.optim.AdamW(
-    linear_head.parameters(),
-    lr=1e-4,              #
-    weight_decay=1e-3, #0.04,  
-)
+supervised = True
+
+if supervised:
+    linear_optimizer = torch.optim.AdamW(
+        [{'params': ist_transformer.parameters(), 'lr': 3e-6},
+        {'params': attention.parameters(),       'lr': 1e-5},
+        {'params': linear_head.parameters(), 'lr': 1e-4}],
+        weight_decay=1e-3, #0.04,  
+    )
+else:
+    optimizer = torch.optim.AdamW([
+        {'params': ist_transformer.parameters(), 'lr': 3e-5},
+        {'params': attention.parameters(),       'lr': 1e-4},
+    ], weight_decay=1e-3)
+
+    linear_optimizer = torch.optim.AdamW(
+        linear_head.parameters(),
+        lr=1e-4,              #
+        weight_decay=1e-3, #0.04,  
+    )
 
 seeds_optimizer = torch.optim.AdamW(
     heads_per_seed.parameters(),
@@ -145,20 +176,22 @@ seeds_optimizer = torch.optim.AdamW(
     weight_decay=1e-3, #0.04,  
 )
 
-
-
 #scaler = torch.cuda.amp.GradScaler()
 criterion = nn.CrossEntropyLoss()
 mse = nn.MSELoss()
 
 #sigreg = SIGReg()
 
-
 schedule = True
 if schedule:
-    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-    cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
+    if supervised:
+        warmup = LinearLR(linear_optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
+        cosine = CosineAnnealingLR(linear_optimizer, T_max=train_epochs - 5)
+        scheduler = SequentialLR(linear_optimizer, schedulers=[warmup, cosine], milestones=[5])
+    else:
+        warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
+        cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
+        scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
 
 
 # %%
@@ -205,18 +238,36 @@ for epoch in range(train_epochs):
 
             loss_jepa = 0
             loss_sigreg = 0
+            
             for j in range(k):
                 for i in range(n_student_draws):
                 #for j in range(n_teacher_draws):
                 #    loss_jepa += mse(output_s[i], output_t[j])
                 
-                    loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
-                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step)
+                    #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                #for i in range(n_teacher_draws):
+                #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
                 #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
 
                 global_step += 1 # !!! TEST !!!
-            #for i in range(n_teacher_draws):
-            #    loss_sigreg += sigreg(output_t[i].float(), global_step)
+
+            w_c_ref = attention(centers)                      # (B, k, 1)
+            w = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
+            z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+
+            for i in range(n_student_draws):
+                w_ref = attention(output_s[i]) 
+                w = torch.softmax(w_ref, dim=1) 
+                z_draw = (w * output_s[i]).sum(dim=1)
+                if not supervised:
+                    loss_jepa += mse(z_draw, z_centers) 
+                #loss_jepa += mse(w_ref, w_c_ref) 
+                loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
+                #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
+
+                global_step += 1
+
             #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
             #global_step += 1
 
@@ -225,15 +276,19 @@ for epoch in range(train_epochs):
                 output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
                 loss_seeds += criterion(output_t_seed, labels)
 
-            output_t_head = linear_head(centers.view(batch_size, k*embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-            loss_label = criterion(output_t_head, labels)
+            if supervised:
+                output_t_head = linear_head(z_centers)
+                loss_label = loss = lam * loss_sigreg + criterion(output_t_head, labels)
+            else:
+                output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                loss_label = criterion(output_t_head, labels)
+                loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
-            loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
-
-        optimizer.zero_grad()
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
-        optimizer.step()
+        if not supervised:
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
+            optimizer.step()
 
         linear_optimizer.zero_grad()
         loss_label.backward()
@@ -251,6 +306,8 @@ for epoch in range(train_epochs):
 
             ist_transformer.eval()
             linear_head.eval()
+            heads_per_seed.eval()
+            attention.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
 
@@ -291,18 +348,35 @@ for epoch in range(train_epochs):
 
                         loss_jepa = 0
                         loss_sigreg = 0
+
                         for j in range(k):
                             for i in range(n_student_draws):
                             #for j in range(n_teacher_draws):
                             #    loss_jepa += mse(output_s[i], output_t[j])
                             
-                                loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
-                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step)
+                                #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
+                            #for i in range(n_teacher_draws):
+                            #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
                             #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
 
                             global_step += 1 # !!! TEST !!!
-                        #for i in range(n_teacher_draws):
-                        #    loss_sigreg += sigreg(output_t[i].float(), global_step)
+
+                        w_c_ref = attention(centers)                      # (B, k, 1)
+                        w_c = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
+                        z_centers = (w_c * centers).sum(dim=1)           # (B, d_model)
+
+                        for i in range(n_student_draws):
+                            w_ref = attention(output_s[i]) 
+                            w = torch.softmax(w_ref, dim=1) 
+                            z_draw = (w * output_s[i]).sum(dim=1)
+                            loss_jepa += mse(z_draw, z_centers) 
+                            #loss_jepa += mse(w_ref, w_c_ref) 
+                            loss_sigreg += sigreg(z_draw.float(), global_step) # TEST : diversité sur les draws
+                            #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
+
+                            global_step += 1
+
                         #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
                         #global_step += 1
 
@@ -312,7 +386,7 @@ for epoch in range(train_epochs):
                             preds = output_t_seed.argmax(dim=1)
                             seeds_correct[j] += (preds == labels).sum().item()
 
-                        output_t_head = linear_head(centers.view(batch_size, k*embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                         loss_label = criterion(output_t_head, labels)
 
                         loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
@@ -320,6 +394,8 @@ for epoch in range(train_epochs):
                         if n_val == 0:
                             ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                             print(f"ratio sigreg/jepa = {ratio:.2f}")
+                            print(w_c[0,...].detach().float().cpu().numpy())
+
                     
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
@@ -344,6 +420,8 @@ for epoch in range(train_epochs):
 
             ist_transformer.train()
             linear_head.train()
+            heads_per_seed.train()
+            attention.train()
 
     if epoch % 10 == 9:
         torch.save({
