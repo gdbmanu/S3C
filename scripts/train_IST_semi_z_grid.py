@@ -42,7 +42,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 embed_dim = 768
 
 # Monter le dossier distant
-local=False
+local=True
 if local == False:
     mount_point = os.path.expanduser("~/imagenet_grid")
 
@@ -96,12 +96,12 @@ n_student_draws = 6
 n_teacher_draws = 2
 
 train_epochs = 100
-lam = 0.5           # λ : trade-off JEPA / SIGReg
+lam = 0.05           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
 supervised = False
 
-save_dir = f"../checkpoints/260522_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_TEST"
+save_dir = f"../checkpoints/260523_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_strict"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
@@ -239,18 +239,19 @@ for epoch in range(train_epochs):
             loss_jepa = 0
             loss_sigreg = 0
             
-            for j in range(k):
-                for i in range(n_student_draws):
-                #for j in range(n_teacher_draws):
-                #    loss_jepa += mse(output_s[i], output_t[j])
-                
-                    #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
-                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
-                #for i in range(n_teacher_draws):
-                #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
-                #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
+            if False:
+                for j in range(k):
+                    for i in range(n_student_draws):
+                    #for j in range(n_teacher_draws):
+                    #    loss_jepa += mse(output_s[i], output_t[j])
+                    
+                        #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                        loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                    #for i in range(n_teacher_draws):
+                    #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
+                    #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
 
-                global_step += 1 # !!! TEST !!!
+                    global_step += 1 # !!! TEST !!!
 
             w_c_ref = attention(centers)                      # (B, k, 1)
             w = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
@@ -349,18 +350,19 @@ for epoch in range(train_epochs):
                         loss_jepa = 0
                         loss_sigreg = 0
 
-                        for j in range(k):
-                            for i in range(n_student_draws):
-                            #for j in range(n_teacher_draws):
-                            #    loss_jepa += mse(output_s[i], output_t[j])
-                            
-                                #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
-                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
-                            #for i in range(n_teacher_draws):
-                            #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
-                            #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
+                        if False:
+                            for j in range(k):
+                                for i in range(n_student_draws):
+                                #for j in range(n_teacher_draws):
+                                #    loss_jepa += mse(output_s[i], output_t[j])
+                                
+                                    #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
+                                #for i in range(n_teacher_draws):
+                                #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
+                                #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
 
-                            global_step += 1 # !!! TEST !!!
+                                global_step += 1 # !!! TEST !!!
 
                         w_c_ref = attention(centers)                      # (B, k, 1)
                         w_c = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
@@ -375,7 +377,7 @@ for epoch in range(train_epochs):
                             loss_sigreg += sigreg(z_draw.float(), global_step) # TEST : diversité sur les draws
                             #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
 
-                            global_step += 1
+                        global_step += 1
 
                         #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
                         #global_step += 1
