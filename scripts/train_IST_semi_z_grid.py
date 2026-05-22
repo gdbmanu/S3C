@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torchvision import datasets
 
 
-from s3c.models.heads import FovealSetTransformer
+from s3c.models.heads import IterativeSeedTransformer #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg #SIGReg
 
@@ -59,23 +59,14 @@ else:
     train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
     val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
 
-n_sab = 2
 
-save_dir = f"../checkpoints/checkpoints_260427_EMA_Xattn_MAB_semi_z_h12_sab{n_sab}_grid_LeJ_TEST1"
+
 
 epoch_teacher = 20
-
 
 zoom = 1.5
 
 std = 0.5 / zoom 
-
-n_saccades_max = 121
-n_uplet_student = 1
-n_uplet_teacher = 8
-
-
-train_epochs = 100
 
 
 train_dataset = ImageNetZDataset(train_dir) 
@@ -94,18 +85,42 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-mab_transformer = FovealSetTransformer(input_dim=embed_dim, 
-                 n_heads=12, n_sab=n_sab, predict=False)
+n_sab = 2
+k = 3
+n_heads = 12
+
+n_saccades_max = 121
+n_uplet_student = 3
+n_uplet_teacher = 8
+n_student_draws = 6
+n_teacher_draws = 2
+
+train_epochs = 100
+lam=1           # λ : trade-off JEPA / SIGReg
+
+save_dir = f"../checkpoints/260522_IST{k}_semi_z_lam{lam}_sab{n_sab}_grid_LeJ"
+
+ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
+                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
                  #n_heads=12, n_sab=4, predict=False)
-mab_transformer.to(device)
-mab_transformer.train()
+ist_transformer.to(device)
+ist_transformer.train()
 
 linear_head = nn.Sequential(
-                nn.LayerNorm(768),
-                nn.Linear(768, 1000),
+                nn.LayerNorm(k*embed_dim),
+                nn.Linear(k*embed_dim, 1000),
             )
 linear_head.to(device)
 linear_head.train()
+
+heads_per_seed = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, 1000) 
+            ) for _ in range(k)
+        ])
+heads_per_seed.to(device)
+heads_per_seed.train()
 
 os.makedirs(save_dir, exist_ok=True)
 
@@ -113,7 +128,7 @@ os.makedirs(save_dir, exist_ok=True)
 #optimizer = torch.optim.SGD(linear_head.parameters(), lr=0.001, momentum=0.9)
 
 optimizer = torch.optim.AdamW(
-    mab_transformer.parameters(),
+    ist_transformer.parameters(),
     lr=3e-5,              #
     weight_decay=1e-3, #0.04,  
 )
@@ -124,13 +139,18 @@ linear_optimizer = torch.optim.AdamW(
     weight_decay=1e-3, #0.04,  
 )
 
+seeds_optimizer = torch.optim.AdamW(
+    heads_per_seed.parameters(),
+    lr=1e-4,              #
+    weight_decay=1e-3, #0.04,  
+)
 
 
-scaler = torch.cuda.amp.GradScaler()
+
+#scaler = torch.cuda.amp.GradScaler()
 criterion = nn.CrossEntropyLoss()
 mse = nn.MSELoss()
 
-lam=0.05           # λ : trade-off JEPA / SIGReg
 #sigreg = SIGReg()
 
 
@@ -152,8 +172,7 @@ os.makedirs(save_dir, exist_ok=True)
 
 global_step = 0
 
-n_student_draws = 6
-n_teacher_draws = 2
+
 
 for epoch in range(train_epochs):  
 
@@ -175,49 +194,62 @@ for epoch in range(train_epochs):
         idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
 
 
-        # Sélectionne les 3 valeurs pour x, y et z
         features_s = features[torch.arange(batch_size).unsqueeze(1), idx_s, :].to(device)  # (batch_size, k, 768)
         features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
 
         #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            output_s = torch.stack([mab_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-            output_t = torch.stack([mab_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
+            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
             centers = output_t.mean(dim=0)
 
             loss_jepa = 0
             loss_sigreg = 0
-            for i in range(n_student_draws):
+            for j in range(k):
+                for i in range(n_student_draws):
                 #for j in range(n_teacher_draws):
                 #    loss_jepa += mse(output_s[i], output_t[j])
-                loss_jepa += mse(output_s[i].detach(), centers) # !!test
-                loss_sigreg += sigreg(output_s[i].float(), global_step)
-                global_step += 1 # !!! TEST 2 !!!
+                
+                    loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step)
+                #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
+
+                global_step += 1 # !!! TEST !!!
             #for i in range(n_teacher_draws):
             #    loss_sigreg += sigreg(output_t[i].float(), global_step)
-            loss_sigreg += sigreg(centers.float(), global_step)
-            global_step += 1
+            #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
+            #global_step += 1
 
-            output_t_head = linear_head(centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+            loss_seeds = 0
+            for j in range(k):
+                output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
+                loss_seeds += criterion(output_t_seed, labels)
+
+            output_t_head = linear_head(centers.view(batch_size, k*embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
             loss_label = criterion(output_t_head, labels)
 
             loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
         optimizer.zero_grad()
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(mab_transformer.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
         optimizer.step()
 
         linear_optimizer.zero_grad()
         loss_label.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(linear_head.parameters(), 1.0)
+        #grad_norm = torch.nn.utils.clip_grad_norm_(linear_head.parameters(), 1.0)
         linear_optimizer.step()
+
+        seeds_optimizer.zero_grad()
+        loss_seeds.backward()
+        #grad_norm = torch.nn.utils.clip_grad_norm_(seeds_optimizer.parameters(), 1.0)
+        seeds_optimizer.step()
 
         total_loss += loss.item()
     
         if (batch_idx + 1) % log_interval == 0:
 
-            mab_transformer.eval()
+            ist_transformer.eval()
             linear_head.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
@@ -233,6 +265,7 @@ for epoch in range(train_epochs):
             running_sigreg= 0.0
             running_jepa= 0.0
             running_label = 0.0
+            seeds_correct = [0.0 for j in range(k)]
             val_iter = iter(val_loader)
 
             with torch.no_grad():
@@ -252,24 +285,34 @@ for epoch in range(train_epochs):
 
                     #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        output_s = torch.stack([mab_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-                        output_t = torch.stack([mab_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
+                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
                         centers = output_t.mean(dim=0)
 
                         loss_jepa = 0
                         loss_sigreg = 0
-                        for i in range(n_student_draws):
+                        for j in range(k):
+                            for i in range(n_student_draws):
                             #for j in range(n_teacher_draws):
                             #    loss_jepa += mse(output_s[i], output_t[j])
-                            loss_jepa += mse(output_s[i].detach(), centers) # !! test !!
-                            loss_sigreg += sigreg(output_s[i].float(), global_step) 
-                            global_step += 1 # !!! TEST 2 !!!
+                            
+                                loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step)
+                            #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
+
+                            global_step += 1 # !!! TEST !!!
                         #for i in range(n_teacher_draws):
                         #    loss_sigreg += sigreg(output_t[i].float(), global_step)
-                        loss_sigreg += sigreg(centers.float(), global_step) # !!TEST
-                        global_step += 1
+                        #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
+                        #global_step += 1
 
-                        output_t_head = linear_head(centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        loss_seeds = 0
+                        for j in range(k):
+                            output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
+                            preds = output_t_seed.argmax(dim=1)
+                            seeds_correct[j] += (preds == labels).sum().item()
+
+                        output_t_head = linear_head(centers.view(batch_size, k*embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                         loss_label = criterion(output_t_head, labels)
 
                         loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
@@ -277,7 +320,7 @@ for epoch in range(train_epochs):
                         if n_val == 0:
                             ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                             print(f"ratio sigreg/jepa = {ratio:.2f}")
-
+                    
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
 
@@ -289,25 +332,27 @@ for epoch in range(train_epochs):
                     total += labels.size(0)
 
             print(f"Top-1 accuracy: {100 * correct / total:.2f}%")
+            for j in range(k):
+                print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
 
             history["classif"].append(100 * correct / total)
             history["loss_sigreg"].append(running_sigreg / total)
             history["loss_jepa"].append(running_jepa / total)
             history["loss_label"].append(running_label / total)
+            df = pd.DataFrame(history)
+            df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
 
-            mab_transformer.train()
+            ist_transformer.train()
             linear_head.train()
 
     if epoch % 10 == 9:
         torch.save({
                 "epoch": epoch,
                 "history": history,
-                "mab_transformer": mab_transformer.state_dict(),
+                "ist_transformer": ist_transformer.state_dict(),
                 "linear_head": linear_head.state_dict()
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
         
-        df = pd.DataFrame(history)
-        df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
 
     if schedule:
         scheduler.step()

@@ -19,7 +19,8 @@ class FoveatedMultiViT(nn.Module):
         x   = x + self.model.pos_embed
         x   = self.model.pos_drop(x)
         x   = self.model.blocks(x)
-        x   = self.model.norm(x)
+        if self.norm:
+            x   = self.model.norm(x)
         return x                                        # (B, 1+N, D)
 
     def forward_multi(self, views):

@@ -123,11 +123,13 @@ class PMA(nn.Module):
         super().__init__()
         self.S = nn.Parameter(torch.randn(1, k, d_model))
         self.mab = MAB(d_model, n_heads, dropout)
+        self.sab = SAB(d_model, n_heads, dropout)
 
     def forward(self, X):
         B = X.size(0)
         S = self.S.expand(B, -1, -1)        # (B, k, d_model)
-        return self.mab(S, X)               # (B, k, d_model)
+        #return self.mab(S, X)              # (B, k, d_model)
+        return self.sab(self.mab(S, X))     # (B, k, d_model)
     
 class SAB(nn.Module):
     """Set Attention Block — full O(n²) attention, fine for small n"""
@@ -141,37 +143,30 @@ class SAB(nn.Module):
 
 class FovealSetTransformer(nn.Module):
     def __init__(self, input_dim=768, 
-                 n_heads=8, n_sab=2, n_classes=1000, dropout=0.1, predict=True, jepa_heads=False, proj_dim=256):
+                 n_heads=8, n_sab=2, k=1, n_classes=1000, dropout=0.1, predict=True, proj=False, proj_dim=256):
         super().__init__()
         
         self.encoder = nn.ModuleList([
             SAB(input_dim, n_heads, dropout) for _ in range(n_sab)
         ])
-        self.pma = PMA(input_dim, n_heads, k=1, dropout=dropout)
+        self.pma = PMA(input_dim, n_heads, k=k, dropout=dropout)
+        self.k = k
         self.predict = predict
         if predict:
             self.head = nn.Sequential(
-                nn.LayerNorm(input_dim),
-                nn.Linear(input_dim, n_classes),
+                nn.LayerNorm(input_dim * k),
+                nn.Linear(input_dim * k, n_classes),
             )
-        self.jepa_heads = jepa_heads
-        if jepa_heads:
-            jepa_dim = proj_dim
-            # Tête JEPA — projection vers espace de prédiction
-            # MLP léger, pas besoin de grande capacité
-            self.jepa_head = nn.Sequential(
-                nn.LayerNorm(input_dim),
-                nn.Linear(input_dim, jepa_dim),
-            )
-            sigreg_dim = proj_dim
-            # Tête SIGReg — projection vers haute dimension comme DINO
+        self.proj = proj
+        self.proj_dim = proj_dim
+        if proj:
             # MLP 3 couches avec GELU, même structure que DINO
-            self.sigreg_head = nn.Sequential(
-                nn.Linear(input_dim, input_dim),
-                nn.GELU(),
-                nn.Linear(input_dim, input_dim),
-                nn.GELU(),
-                nn.Linear(input_dim, sigreg_dim),
+            self.proj_head = nn.Sequential(
+                #nn.Linear(input_dim, input_dim),
+                #nn.GELU(),
+                #nn.Linear(input_dim, input_dim),
+                #nn.GELU(),
+                nn.Linear(input_dim, proj_dim),
                 # Pas de normalisation finale — SIGReg doit voir
                 # les embeddings bruts pour enforcer N(0, I)
             )            
@@ -180,11 +175,107 @@ class FovealSetTransformer(nn.Module):
         # X: (B, n, 768), n entre 2 et 15
         for sab in self.encoder:
             x = sab(x)
-        x = self.pma(x).squeeze(1)
-        if self.jepa_heads:
-            return x, self.jepa_head(x), self.sigreg_head(x)
-        else:
-            if self.predict:
-                return self.head(x)
+        if self.k==1:
+            x = self.pma(x).squeeze(1)
+            if self.proj:
+                return self.proj(x)
             else:
-                return x
+                if self.predict:
+                    return self.head(x)
+                else:
+                    return x
+        else:
+            x = self.pma(x)
+            B, k, emb_dim = x.shape
+            if self.proj:
+                x = x.view(B * k, emb_dim)
+                x = self.proj_head(x)
+                return x.view(B, k, self.proj_dim)
+            else:
+                if self.predict:
+                    return self.head(x.view(B, k * emb_dim)) 
+                else:
+                    return x
+                
+
+class SeedBlock(nn.Module):
+    """
+    Un bloc = 
+      - self-attention sur les vues (les vues se transforment entre elles)
+      - cross-attention seeds → vues (seeds lisent les vues transformées)
+      - self-attention sur les seeds (seeds se coordonnent)
+    """
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+
+        # Self-attention sur les vues
+        self.view_self_attn = nn.MultiheadAttention(
+            d_model, n_heads, dropout=dropout, batch_first=True
+        )
+        self.view_norm1 = nn.LayerNorm(d_model)
+        self.view_ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
+        )
+        self.view_norm2 = nn.LayerNorm(d_model)
+
+        # Cross-attention : seeds lisent les vues
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm1 = nn.LayerNorm(d_model)
+
+        # Self-attention sur les seeds
+        self.seed_self_attn = nn.MultiheadAttention(
+            d_model, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm2 = nn.LayerNorm(d_model)
+        self.seed_ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
+        )
+        self.seed_norm3 = nn.LayerNorm(d_model)
+
+    def forward(self, seeds, views):
+        # ── 1. Vues se transforment entre elles ──────────────────────
+        h, _ = self.view_self_attn(views, views, views)
+        views = self.view_norm1(views + h)
+        views = self.view_norm2(views + self.view_ffn(views))
+
+        # ── 2. Seeds lisent les vues transformées ─────────────────────
+        h, _ = self.cross_attn(seeds, views, views)
+        seeds = self.seed_norm1(seeds + h)
+
+        # ── 3. Seeds se coordonnent ───────────────────────────────────
+        h, _ = self.seed_self_attn(seeds, seeds, seeds)
+        seeds = self.seed_norm2(seeds + h)
+        seeds = self.seed_norm3(seeds + self.seed_ffn(seeds))
+
+        return seeds, views   # les deux évoluent
+
+
+class IterativeSeedTransformer(nn.Module):
+    def __init__(self, input_dim=768, d_model=768,
+                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1):
+        super().__init__()
+        self.proj  = (nn.Linear(input_dim, d_model)
+                      if input_dim != d_model else nn.Identity())
+        self.seeds = nn.Parameter(torch.randn(1, n_seeds, d_model))
+        self.blocks = nn.ModuleList([
+            SeedBlock(d_model, n_heads, dropout) for _ in range(n_blocks)
+        ])
+        #self.norm_seeds = nn.LayerNorm(d_model)
+        #self.norm_views = nn.LayerNorm(d_model)
+
+    def forward(self, X):
+        B = X.size(0)
+        views = self.proj(X)
+        seeds = self.seeds.expand(B, -1, -1).clone()
+
+        for block in self.blocks:
+            seeds, views = block(seeds, views)   # co-évolution
+
+        return seeds #self.norm_seeds(seeds)   # (B, n_seeds, d_model)
+        # views finales disponibles si besoin : self.norm_views(views)
