@@ -42,7 +42,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 embed_dim = 768
 
 # Monter le dossier distant
-local=True
+local=False
 if local == False:
     mount_point = os.path.expanduser("~/imagenet_grid")
 
@@ -85,7 +85,7 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-n_sab = 2
+n_sab = 4
 k = 3
 n_heads = 12
 
@@ -96,11 +96,12 @@ n_student_draws = 6
 n_teacher_draws = 2
 
 train_epochs = 100
-lam=0.5           # λ : trade-off JEPA / SIGReg
+lam=0.05           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
+supervised = False
 
-save_dir = f"../checkpoints/260522_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_SUP_TEST"
+save_dir = f"../checkpoints/260522_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_TEST"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
@@ -149,7 +150,6 @@ os.makedirs(save_dir, exist_ok=True)
     weight_decay=1e-3, #0.04,  
 )'''
 
-supervised = True
 
 if supervised:
     linear_optimizer = torch.optim.AdamW(
@@ -428,6 +428,7 @@ for epoch in range(train_epochs):
                 "epoch": epoch,
                 "history": history,
                 "ist_transformer": ist_transformer.state_dict(),
+                "attention": attention.state_dict(),
                 "linear_head": linear_head.state_dict()
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
         
