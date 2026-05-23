@@ -268,13 +268,13 @@ class SeedBlock(nn.Module):
 
 class IterativeSeedTransformer(nn.Module):
     def __init__(self, input_dim=768, d_model=768,
-                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1):
+                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1, self_att=False):
         super().__init__()
         self.proj  = (nn.Linear(input_dim, d_model)
                       if input_dim != d_model else nn.Identity())
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, d_model))
         self.blocks = nn.ModuleList([
-            SeedBlock(d_model, n_heads, dropout) for _ in range(n_blocks)
+            SeedBlock(d_model, n_heads, dropout, self_att) for _ in range(n_blocks)
         ])
         #self.norm_seeds = nn.LayerNorm(d_model)
         #self.norm_views = nn.LayerNorm(d_model)

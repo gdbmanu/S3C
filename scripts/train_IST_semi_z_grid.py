@@ -42,7 +42,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 embed_dim = 768
 
 # Monter le dossier distant
-local=True
+local=False
 if local == False:
     mount_point = os.path.expanduser("~/imagenet_grid")
 
@@ -58,8 +58,6 @@ if local == False:
 else:
     train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
     val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
-
-
 
 
 epoch_teacher = 20
@@ -96,15 +94,16 @@ n_student_draws = 6
 n_teacher_draws = 2
 
 train_epochs = 100
-lam = 0.05           # λ : trade-off JEPA / SIGReg
+lam = 0.5           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
 supervised = False
+self_att = True
 
-save_dir = f"../checkpoints/260523_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_strict"
+save_dir = f"../checkpoints/260523_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_{self_att}_grid_LeJ"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
-                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
+                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab, self_att=self_att)
                  #n_heads=12, n_sab=4, predict=False)
 ist_transformer.to(device)
 ist_transformer.train()
