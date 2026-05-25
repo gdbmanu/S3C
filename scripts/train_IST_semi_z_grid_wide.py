@@ -42,7 +42,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 embed_dim = 768
 
 # Monter le dossier distant
-local=False
+local=True
 if local == False:
     mount_point = os.path.expanduser("~/imagenet_grid")
 
@@ -84,38 +84,37 @@ val_loader = DataLoader(
     )
 
 n_sab = 2
-k = 3
+k = 1
 n_heads = 12
 
 n_saccades_max = 121
 n_uplet_student = 3
-n_uplet_teacher = 8
+n_uplet_teacher = 9 #5
 n_student_draws = 6
-n_teacher_draws = 2
+n_teacher_draws = 1
 
 train_epochs = 100
-
-lam = 0           # λ : trade-off JEPA / SIGReg
+lam = 0.05           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
-supervised = True
-self_attn = False
+supervised = False
 test = False # seed diversity
-test3 = True # no sample diversity
-test4 = True # mixing diversity (through samples)
-strict_global_step = False
+test3 = False # no sample diversity
+test4 = False # mixing diversity (through samples)
+strict_global_step = True
+wide_views = True
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
 if test : suffix = suffix + "_TEST"
 if test3 : suffix = suffix + "_TEST3"
 if test4 : suffix = suffix + "_TEST4"
-if strict_global_step : suffix + "_STRICT"
+if strict_global_step : suffix = suffix + "_STRICT"
 
-save_dir = f"../checkpoints/260524_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ_{suffix}"
+save_dir = f"../checkpoints/260526_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ{suffix}_wide_s{n_uplet_student}_t{n_uplet_teacher}"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
-                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab, self_att=self_att)
+                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
                  #n_heads=12, n_sab=4, predict=False)
 ist_transformer.to(device)
 ist_transformer.train()
@@ -234,9 +233,14 @@ for epoch in range(train_epochs):
         
         batch_size, n = sxs.shape
         perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
-        idx_s = perms[:, :n_uplet_student * n_student_draws]                                    # (batch_size, n_uplet_student)
-        idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
-
+        #wide = torch.tensor([0, 10, 60, 110, 120] * n_teacher_draws).repeat(batch_size, 1) 
+        regular_grid = [12, 20, 60, 100, 108, 38, 58, 62, 82]
+        wide = torch.tensor(regular_grid[:n_uplet_teacher] * n_teacher_draws).repeat(batch_size, 1) 
+        idx_s = perms[:, :n_uplet_student * n_student_draws]       
+        if wide_views:
+            idx_t = wide[:, : n_uplet_teacher * n_teacher_draws]   # (batch_size, n_uplet_teacher)
+        else:
+            idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
 
         features_s = features[torch.arange(batch_size).unsqueeze(1), idx_s, :].to(device)  # (batch_size, k, 768)
         features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
@@ -265,18 +269,24 @@ for epoch in range(train_epochs):
                     if not strict_global_step:
                         global_step += 1 # !!! TEST !!!
 
-            w_c_ref = attention(centers)                      # (B, k, 1)
-            w = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
-            z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+            if k > 1:
+                w_c_ref = attention(centers)                      # (B, k, 1)
+                w = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
+                z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+            else:
+                z_centers = centers.squeeze(dim=1)
 
             if test4:
                 global_step_w = global_step
                 if not strict_global_step:
                     global_step += 1
             for i in range(n_student_draws):
-                w_ref = attention(output_s[i]) 
-                w = torch.softmax(w_ref, dim=1) 
-                z_draw = (w * output_s[i]).sum(dim=1)
+                if k > 1:
+                    w_ref = attention(output_s[i]) 
+                    w = torch.softmax(w_ref, dim=1) 
+                    z_draw = (w * output_s[i]).sum(dim=1)
+                else:
+                    z_draw = output_s[0].squeeze(dim=1)
                 #if not supervised:
                 loss_jepa += mse(z_draw, z_centers) 
                 #loss_jepa += mse(w_ref, w_c_ref) 
@@ -356,9 +366,13 @@ for epoch in range(train_epochs):
 
                     batch_size, n = sxs.shape
                     perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
+                    regular_grid = [12, 20, 60, 100, 108, 38, 58, 62, 82]
+                    wide = torch.tensor(regular_grid[:n_uplet_teacher] * n_teacher_draws).repeat(batch_size, 1)                     
                     idx_s = perms[:, :n_uplet_student * n_student_draws]                                    # (batch_size, n_uplet_student)
-                    idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
-
+                    if wide_views:
+                        idx_t = wide[:, : n_uplet_teacher * n_teacher_draws]   # (batch_size, n_uplet_teacher)
+                    else:
+                        idx_t = perms[:, n_uplet_student * n_student_draws:n_uplet_student*n_student_draws + n_uplet_teacher*n_teacher_draws]   # (batch_size, n_uplet_teacher)
 
                     # Sélectionne les 3 valeurs pour x, y et z
                     features_s = features[torch.arange(batch_size).unsqueeze(1), idx_s, :].to(device)  # (batch_size, k, 768)
@@ -370,65 +384,72 @@ for epoch in range(train_epochs):
                         output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
                         centers = output_t.mean(dim=0)
 
-                        loss_jepa = 0
-                        loss_sigreg = 0
+                    loss_jepa = torch.tensor(0.).to(device)
+                    loss_sigreg = torch.tensor(0.).to(device)
 
-                        if test:
-                            for j in range(k):
-                                for i in range(n_student_draws):
-                                #for j in range(n_teacher_draws):
-                                #    loss_jepa += mse(output_s[i], output_t[j])
-                                
-                                    #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
-                                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
-                                #for i in range(n_teacher_draws):
-                                #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
-                                #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
-                                if not strict_global_step:
-                                    global_step += 1 # !!! TEST 2  !!!
-
-                        w_c_ref = attention(centers)                      # (B, k, 1)
-                        w_c = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
-                        z_centers = (w_c * centers).sum(dim=1)           # (B, d_model)
-
-                        if test4:
-                            global_step_w = global_step
+                    if test:
+                        for j in range(k):
+                            for i in range(n_student_draws):
+                            #for j in range(n_teacher_draws):
+                            #    loss_jepa += mse(output_s[i], output_t[j])
+                            
+                                #loss_jepa += mse(output_s[i,:,j,:], centers[:,j,:]) 
+                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
+                            #for i in range(n_teacher_draws):
+                            #    loss_sigreg += sigreg(output_t[i,:,j,:].float(), global_step)
+                            #loss_sigreg += sigreg(output_s[i].view(batch_size, k*embed_dim).float(), global_step)
                             if not strict_global_step:
-                                global_step += 1
-                        for i in range(n_student_draws):
+                                global_step += 1 # !!! TEST 2  !!!
+
+                    if k > 1:
+                        w_c_ref = attention(centers)                      # (B, k, 1)
+                        w = torch.softmax(w_c_ref * inv_temp, dim=1)      # (B, k, 1)
+                        z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+                    else:
+                        z_centers = centers.squeeze(dim=1)
+
+                    if test4:
+                        global_step_w = global_step
+                        if not strict_global_step:
+                            global_step += 1
+                    for i in range(n_student_draws):
+                        if k > 1:
                             w_ref = attention(output_s[i]) 
                             w = torch.softmax(w_ref, dim=1) 
                             z_draw = (w * output_s[i]).sum(dim=1)
-                            loss_jepa += mse(z_draw, z_centers) 
-                            #loss_jepa += mse(w_ref, w_c_ref) 
-                            if not test3: ## TEST 3
-                                loss_sigreg += sigreg(z_draw.float(), global_step) # TEST : diversité sur les draws
-                                #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
-                                if not strict_global_step:
-                                    global_step += 1
-                            if test4:
-                                loss_sigreg += sigreg(w_ref.squeeze().float(), global_step_w) ## !! diversité des mélanges
-                                
-                        if strict_global_step:
-                            global_step += 1
+                        else:
+                            z_draw = output_s[0].squeeze(dim=1)
+                        loss_jepa += mse(z_draw, z_centers) 
+                        #loss_jepa += mse(w_ref, w_c_ref) 
+                        if not test3: ## TEST 3
+                            loss_sigreg += sigreg(z_draw.float(), global_step) # TEST : diversité sur les draws
+                            #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
+                            if not strict_global_step:
+                                global_step += 1
+                        if test4:
+                            loss_sigreg += sigreg(w_ref.squeeze().float(), global_step_w) ## !! diversité des mélanges
+                            
+                    if strict_global_step:
+                        global_step += 1
 
-                        #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
-                        #global_step += 1
+                    #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
+                    #global_step += 1
 
-                        loss_seeds = 0
-                        for j in range(k):
-                            output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
-                            preds = output_t_seed.argmax(dim=1)
-                            seeds_correct[j] += (preds == labels).sum().item()
+                    loss_seeds = 0
+                    for j in range(k):
+                        output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
+                        preds = output_t_seed.argmax(dim=1)
+                        seeds_correct[j] += (preds == labels).sum().item()
 
-                        output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                        loss_label = criterion(output_t_head, labels)
+                    output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                    loss_label = criterion(output_t_head, labels)
 
-                        loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
+                    loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
-                        if n_val == 0:
-                            ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
-                            print(f"ratio sigreg/jepa = {ratio:.2f}")
+                    if n_val == 0:
+                        ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
+                        print(f"ratio sigreg/jepa = {ratio:.2f}")
+                        if k>1:
                             print(w_c[0,...].detach().float().cpu().numpy())
 
                     

@@ -241,34 +241,36 @@ class SeedBlock(nn.Module):
         )
         self.seed_norm3 = nn.LayerNorm(d_model)
 
+
     def forward(self, seeds, views):
         # ── 1. Vues se transforment entre elles ──────────────────────
 
         v = self.view_norm1(views)
         h_views, _ = self.view_self_attn(v, v, v)
         views = views + h_views
-        views = views + self.view_ffn(self.view_norm2(views))
+        v2 = self.view_norm2(views)
+        views = views + self.view_ffn(v2)
 
         # ── 2. Seeds lisent les vues transformées ─────────────────────
         s = self.seed_norm1(seeds)
-        h_seeds, _ = self.cross_attn(s, v, v)
-        seeds_1 = seeds + h_seeds 
+        h_seeds, _ = self.cross_attn(s, v2, v2)
+        seeds = seeds + h_seeds 
 
         # ── 3. Seeds se coordonnent ───────────────────────────────────
         if self.self_att:
-            s1 = self.seed_norm2(seeds_1)
-            h_self, _ = self.seed_self_attn(s1, s1, s1)
-            seeds_2 = seeds_1 + h_self
-            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds_2))
+            s2 = self.seed_norm2(seeds)
+            h_self, _ = self.seed_self_attn(s2, s2, s2)
+            seeds = seeds + h_self
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
         else:
-            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds_1))
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
 
         return seeds, views   # les deux évoluent
 
 
 class IterativeSeedTransformer(nn.Module):
     def __init__(self, input_dim=768, d_model=768,
-                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1, self_att=False):
+                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1, self_att=False, normalize=False):
         super().__init__()
         self.proj  = (nn.Linear(input_dim, d_model)
                       if input_dim != d_model else nn.Identity())
@@ -276,7 +278,8 @@ class IterativeSeedTransformer(nn.Module):
         self.blocks = nn.ModuleList([
             SeedBlock(d_model, n_heads, dropout, self_att) for _ in range(n_blocks)
         ])
-        #self.norm_seeds = nn.LayerNorm(d_model)
+        self.norm_seeds = nn.LayerNorm(d_model)
+        self.normalize = normalize
         #self.norm_views = nn.LayerNorm(d_model)
 
     def forward(self, X):
@@ -287,5 +290,8 @@ class IterativeSeedTransformer(nn.Module):
         for block in self.blocks:
             seeds, views = block(seeds, views)   # co-évolution
 
-        return seeds #self.norm_seeds(seeds)   # (B, n_seeds, d_model)
+        if self.normalize:
+            return self.norm_seeds(seeds)   # (B, n_seeds, d_model)
+        else:
+            return seeds
         # views finales disponibles si besoin : self.norm_views(views)
