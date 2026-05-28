@@ -101,8 +101,11 @@ supervised = False
 test = False # seed diversity
 test3 = False # no sample diversity
 test4 = False # mixing diversity (through samples)
-strict_global_step = True
+strict_global_step = False
 wide_views = True
+central_integration = False
+stop_gradient = False
+cross_integration = True
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
@@ -110,8 +113,12 @@ if test : suffix = suffix + "_TEST"
 if test3 : suffix = suffix + "_TEST3"
 if test4 : suffix = suffix + "_TEST4"
 if strict_global_step : suffix = suffix + "_STRICT"
+if central_integration : suffix = suffix + "_CENTRAL"
+if stop_gradient : suffix = suffix + "_STOP"
+if cross_integration : suffix = suffix + "_CROSS"
 
-save_dir = f"../checkpoints/260526_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ{suffix}_wide_s{n_uplet_student}_t{n_uplet_teacher}"
+
+save_dir = f"../checkpoints/260528_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_grid_LeJ{suffix}_wide_s{n_uplet_student}_t{n_uplet_teacher}"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
@@ -280,23 +287,41 @@ for epoch in range(train_epochs):
                 global_step_w = global_step
                 if not strict_global_step:
                     global_step += 1
+
+            z_draws = []
             for i in range(n_student_draws):
                 if k > 1:
                     w_ref = attention(output_s[i]) 
                     w = torch.softmax(w_ref, dim=1) 
                     z_draw = (w * output_s[i]).sum(dim=1)
                 else:
-                    z_draw = output_s[0].squeeze(dim=1)
-                #if not supervised:
-                loss_jepa += mse(z_draw, z_centers) 
+                    z_draw = output_s[i].squeeze(dim=1)
+                if not cross_integration:
+                    if stop_gradient:
+                        loss_jepa += mse(z_draw, z_centers.detach())
+                    else:
+                        loss_jepa += mse(z_draw, z_centers)
+                else:
+                    z_draws.append(z_draw.clone())
                 #loss_jepa += mse(w_ref, w_c_ref) 
                 if not test3:
                     loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
+                    if central_integration:
+                        loss_sigreg += sigreg(z_centers.float(), global_step)
                     #
                     if not strict_global_step:
                         global_step += 1
                 if test4:
                     loss_sigreg += sigreg(w_ref.squeeze().float(), global_step_w) ## !! diversité des mélanges
+
+            if cross_integration and k==1:
+                z_stacked = torch.stack(z_draws, dim=1)
+                w_ref = attention(z_stacked) 
+                w = torch.softmax(w_ref, dim=1) 
+                global_z_draw = (w * z_stacked).sum(dim=1)
+                loss_jepa = mse(global_z_draw, z_centers)
+            else:
+                assert False # not implemented
                     
 
             if strict_global_step:
@@ -403,8 +428,8 @@ for epoch in range(train_epochs):
 
                     if k > 1:
                         w_c_ref = attention(centers)                      # (B, k, 1)
-                        w = torch.softmax(w_c_ref * inv_temp, dim=1)      # (B, k, 1)
-                        z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+                        w_c = torch.softmax(w_c_ref * inv_temp, dim=1)      # (B, k, 1)
+                        z_centers = (w_c * centers).sum(dim=1)           # (B, d_model)
                     else:
                         z_centers = centers.squeeze(dim=1)
 
@@ -412,22 +437,43 @@ for epoch in range(train_epochs):
                         global_step_w = global_step
                         if not strict_global_step:
                             global_step += 1
+
+                    z_draws = []
                     for i in range(n_student_draws):
                         if k > 1:
                             w_ref = attention(output_s[i]) 
                             w = torch.softmax(w_ref, dim=1) 
                             z_draw = (w * output_s[i]).sum(dim=1)
                         else:
-                            z_draw = output_s[0].squeeze(dim=1)
-                        loss_jepa += mse(z_draw, z_centers) 
+                            z_draw = output_s[i].squeeze(dim=1)
+
+                        if not cross_integration:
+                            if stop_gradient:
+                                loss_jepa += mse(z_draw, z_centers.detach())
+                            else:
+                                loss_jepa += mse(z_draw, z_centers)
+                        else:
+                            z_draws.append(z_draw.clone())
+
                         #loss_jepa += mse(w_ref, w_c_ref) 
                         if not test3: ## TEST 3
                             loss_sigreg += sigreg(z_draw.float(), global_step) # TEST : diversité sur les draws
                             #loss_sigreg += sigreg(w_ref.squeeze().float(), global_step)
+                            if central_integration:
+                                loss_sigreg += sigreg(z_centers.float(), global_step)
                             if not strict_global_step:
                                 global_step += 1
                         if test4:
                             loss_sigreg += sigreg(w_ref.squeeze().float(), global_step_w) ## !! diversité des mélanges
+
+                    if cross_integration and k==1:
+                        z_stacked = torch.stack(z_draws, dim=1)
+                        w_ref = attention(z_stacked) 
+                        w = torch.softmax(w_ref, dim=1) 
+                        global_z_draw = (w * z_stacked).sum(dim=1)
+                        loss_jepa = mse(global_z_draw, z_centers)
+                    else:
+                        assert False # not implemented
                             
                     if strict_global_step:
                         global_step += 1
@@ -451,7 +497,8 @@ for epoch in range(train_epochs):
                         print(f"ratio sigreg/jepa = {ratio:.2f}")
                         if k>1:
                             print(w_c[0,...].detach().float().cpu().numpy())
-
+                        elif cross_integration:
+                            print(w[0,...].detach().float().cpu().numpy())
                     
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
