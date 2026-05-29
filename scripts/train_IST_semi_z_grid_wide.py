@@ -56,8 +56,10 @@ if local == False:
     train_dir = os.path.join(mount_point, "train")
     val_dir = os.path.join(mount_point, "val")
 else:
-    train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
-    val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
+    #train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
+    #val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
+    train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
+    val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
 
 
 epoch_teacher = 20
@@ -87,22 +89,22 @@ n_sab = 2
 k = 1
 n_heads = 12
 
-n_saccades_max = 121
+n_saccades_max = 30 #121
 n_uplet_student = 3
 n_uplet_teacher = 9 #5
 n_student_draws = 6
-n_teacher_draws = 1
+n_teacher_draws = 2
 
 train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
-supervised = False
+supervised = True
 test = False # seed diversity
 test3 = False # no sample diversity
 test4 = False # mixing diversity (through samples)
 strict_global_step = False
-wide_views = True
+wide_views = False
 central_integration = False
 stop_gradient = False
 cross_integration = True
