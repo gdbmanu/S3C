@@ -24,7 +24,7 @@ from torchvision import datasets
 
 from s3c.models.heads import IterativeSeedTransformer #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
-from s3c.utils.training import sigreg #SIGReg
+from s3c.utils.training import sigreg, vicReg_seed #SIGReg
 
 import timm
 
@@ -49,7 +49,7 @@ zoom = 1.5
 std = 0.5 / zoom 
 
 n_sab = 2
-k = 1
+k = 3
 n_heads = 12
 
 n_saccades_max = 30 
@@ -70,12 +70,16 @@ wide_views = False
 central_integration = False
 stop_gradient = False
 cross_integration = True
-grid = True
+grid = False
 curriculum = False
+vicreg = True # seed diversity (like test)
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
 if test : suffix = suffix + "_TEST"
+if vicreg: 
+    suffix = suffix + "_VICREG"
+    if test : assert False # inconsistent
 if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
 if central_integration : suffix = suffix + "_CENTRAL"
@@ -349,13 +353,17 @@ for epoch in range(train_epochs):
             loss_jepa = 0
             loss_sigreg = 0
             
-            if test: 
+            if test or vicreg: 
                 if k>1:
-                    for j in range(k): # seeds loop
-                        for i in range(n_student_draws):           
-                            loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
-                        if not strict_global_step:
-                            global_step += 1 # !!! TEST !!!
+                    if test:
+                        for j in range(k): # seeds loop
+                            for i in range(n_student_draws):           
+                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                            if not strict_global_step:
+                                global_step += 1 # !!! TEST !!!
+                    else: #vicreg
+                        for i in range(n_student_draws): 
+                            loss_sigreg += vicReg_seed(output_s[i].float()) # seed diversity through vicreg
                 else:
                     assert False # not consistent
 
@@ -510,13 +518,17 @@ for epoch in range(train_epochs):
                     loss_jepa = torch.tensor(0.).to(device)
                     loss_sigreg = torch.tensor(0.).to(device)
 
-                    if test: 
+                    if test or vicreg: 
                         if k>1:
-                            for j in range(k): # seeds loop
-                                for i in range(n_student_draws):           
-                                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
-                                if not strict_global_step:
-                                    global_step += 1 # !!! TEST !!!
+                            if test:
+                                for j in range(k): # seeds loop
+                                    for i in range(n_student_draws):           
+                                        loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                                    if not strict_global_step:
+                                        global_step += 1 # !!! TEST !!!
+                            else: #vicreg
+                                for i in range(n_student_draws): 
+                                    loss_sigreg += vicReg_seed(output_s[i].float()) # seed diversity through vicreg
                         else:
                             assert False # not consistent
 

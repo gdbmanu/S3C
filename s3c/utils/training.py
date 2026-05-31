@@ -402,3 +402,41 @@ def sigreg(x, global_step, num_slices=256):
     return loss.mean()                          # scalaire
 
 
+def vicReg_seed(z):
+    """
+    z: Tenseur de taille [B, k, d]
+        B = Taille du batch
+        k = Les k vecteurs latents (z1, z2, z3,...), dont o,n renforce la "diversité"
+        d = Dimension de chaque vecteur latent
+    """
+    B, k, d = z.shape 
+    
+    # 1. CENTRAGE de chaque vecteur z_i sur sa dimension d
+    # On centre par rapport à la moyenne des features pour stabiliser le calcul
+    z_centered = z - z.mean(dim=-1, keepdim=True)
+    
+    # 2. CALCUL DE LA MATRICE DE COVARIANCE (B, k, k)
+    # On fait le produit matriciel entre les aspects pour chaque élément du batch
+    # (B, k, d) x (B, d, k) -> (B, k, k)
+    # Chaque matrice 3x3 représente les corrélations entre z1, z2 et z3 pour une scène donnée.
+    cov_matrices = torch.bmm(z_centered, z_centered.transpose(1, 2)) / (d - 1)
+    
+    # 3. PERTE DE COVARIANCE (Hors-diagonale -> 0)
+    # On crée un masque pour extraire uniquement les éléments hors-diagonale
+    mask = ~torch.eye(k, dtype=torch.bool, device=z.device) # Matrice kxk avec False sur la diagonale
+    mask_batch = mask.unsqueeze(0).expand(B, -1, -1)        # Étendu à la taille du batch (B, k, k)
+    
+    # On isole les éléments hors-diagonale, on les élève au carré, et on fait la moyenne
+    off_diag_elements = cov_matrices[mask_batch]
+    loss_cov = torch.mean(off_diag_elements ** 2)
+    
+    # 4. PERTE DE VARIANCE (Diagonale -> gamma)
+    # Pour éviter l'effondrement (z1=z2=z3=0), on force la variance de chaque z_i à être >= gamma
+    # On calcule l'écart-type de chaque vecteur z_i (taille [B, k])
+    std = torch.sqrt(z.var(dim=-1) + 1e-4)
+    loss_var = torch.mean(torch.clamp(1 - std, min=0.0))
+    
+    # Perte totale combinée
+    total_loss = loss_cov + loss_var
+    
+    return total_loss
