@@ -32,6 +32,8 @@ from PIL import Image
 
 from tqdm import tqdm
 
+from datetime import datetime
+
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
@@ -41,33 +43,80 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 embed_dim = 768
 
-# Monter le dossier distant
-local=True
-if local == False:
-    mount_point = os.path.expanduser("~/imagenet_grid")
-
-    try:
-        os.makedirs(mount_point, exist_ok=True)
-        subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_grid_Z", mount_point, "-o", "reconnect"], check=True)
-    except:
-        pass
-
-    # Ton code ici, en utilisant mount_point
-    train_dir = os.path.join(mount_point, "train")
-    val_dir = os.path.join(mount_point, "val")
-else:
-    #train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
-    #val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
-    train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
-    val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
-
-
 epoch_teacher = 20
 
 zoom = 1.5
-
 std = 0.5 / zoom 
 
+n_sab = 2
+k = 1
+n_heads = 12
+
+n_saccades_max = 30 
+n_uplet_student = 3
+n_uplet_teacher = 9 #5
+n_student_draws = 6
+n_teacher_draws = 2
+
+train_epochs = 100
+lam = 0.05           # λ : trade-off JEPA / SIGReg
+
+inv_temp = 1
+supervised = False
+test = False # seed diversity
+test3 = False # no sample diversity
+strict_global_step = False
+wide_views = False
+central_integration = False
+stop_gradient = False
+cross_integration = True
+grid = True
+curriculum = False
+
+suffix = ""
+if supervised : suffix = suffix + "_SUP"
+if test : suffix = suffix + "_TEST"
+if test3 : suffix = suffix + "_TEST3"
+if strict_global_step : suffix = suffix + "_STRICT"
+if central_integration : suffix = suffix + "_CENTRAL"
+if stop_gradient : suffix = suffix + "_STOP"
+if cross_integration : suffix = suffix + "_CROSS"
+if wide_views : suffix = suffix + "_WIDE"
+if curriculum:
+    load_dir = f"../checkpoints/260528_IST1+ABMIL_semi_z_lam0.05_sab2_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_(**)"
+    suffix = suffix + "_CURRI"
+if grid : 
+    suffix = suffix + "_GRID"
+    n_saccades_max = 121
+
+save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}"
+
+# Monter le dossier distant
+local=True
+if local == False:
+    if grid: 
+        mount_point = os.path.expanduser("~/imagenet_grid")
+        try:
+            os.makedirs(mount_point, exist_ok=True)
+            subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_grid_Z", mount_point, "-o", "reconnect"], check=True)
+        except:
+            pass
+    else:
+        mount_point = os.path.expanduser("~/imagenet")
+        try:
+            os.makedirs(mount_point, exist_ok=True)
+            subprocess.run(["sshfs", "dauce.e@brain-lid-004:Recherche/scripts/S3C/scripts/data/Imagenet_Z", mount_point, "-o", "reconnect"], check=True)
+        except:
+            pass
+    train_dir = os.path.join(mount_point, "train")
+    val_dir = os.path.join(mount_point, "val")
+else:
+    if grid:
+        train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
+        val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
+    else:
+        train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
+        val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
 
 train_dataset = ImageNetZDataset(train_dir) 
 val_dataset   = ImageNetZDataset(val_dir) 
@@ -85,74 +134,91 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-n_sab = 2
-k = 3
-n_heads = 12
 
-n_saccades_max = 30 #121
-n_uplet_student = 3
-n_uplet_teacher = 9 #5
-n_student_draws = 6
-n_teacher_draws = 2
-
-train_epochs = 100
-lam = 0.05           # λ : trade-off JEPA / SIGReg
-
-inv_temp = 1
-supervised = True
-test = True # seed diversity
-test3 = False # no sample diversity
-strict_global_step = False
-wide_views = False
-central_integration = False
-stop_gradient = False
-cross_integration = True
-
-suffix = ""
-if supervised : suffix = suffix + "_SUP"
-if test : suffix = suffix + "_TEST"
-if test3 : suffix = suffix + "_TEST3"
-if strict_global_step : suffix = suffix + "_STRICT"
-if central_integration : suffix = suffix + "_CENTRAL"
-if stop_gradient : suffix = suffix + "_STOP"
-if cross_integration : suffix = suffix + "_CROSS"
-if wide_views : suffix = suffix + "_WIDE"
-
-
-save_dir = f"../checkpoints/260529_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_LeJ{suffix}_wide_s{n_uplet_student}_t{n_uplet_teacher}"
 
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
-                 #n_heads=12, n_sab=4, predict=False)
-ist_transformer.to(device)
-ist_transformer.train()
-
-
 
 attention = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, 256),
             nn.Tanh(),
             nn.Linear(256, 1),
+        )     
+
+if k>1:
+    attentions = nn.ModuleList([
+        nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
         )
+        for _ in range(k)
+    ])      
+
+linear_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, 1000),
+            )
+
+
+if curriculum:
+    epoch_ist = 100
+    checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_ist}.pt")  # exemple
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    # Vérifie les clés disponibles
+    print("Clés du checkpoint :", checkpoint.keys())
+
+    if "ist_transformer" not in checkpoint:
+        raise KeyError(f"Aucune clé 'ist_transformer' trouvée dans {checkpoint_path}")
+    state_dict = checkpoint["ist_transformer"]
+    missing, unexpected = ist_transformer.load_state_dict(state_dict, strict=False)
+    print("➡️ Poids chargés (ist_transformer).")
+    print("❗ Paramètres manquants :", missing)
+    print("⚠️ Paramètres inattendus :", unexpected)
+
+    if "attention" not in checkpoint:
+        raise KeyError(f"Aucune clé 'attention' trouvée dans {checkpoint_path}")
+    state_dict = checkpoint["attention"]
+    missing, unexpected = attention.load_state_dict(state_dict, strict=False)
+    print("➡️ Poids chargés (attention).")
+    print("❗ Paramètres manquants :", missing)
+    print("⚠️ Paramètres inattendus :", unexpected)
+
+    if "linear_head" not in checkpoint:
+        raise KeyError(f"Aucune clé 'linear_head' trouvée dans {checkpoint_path}")
+    state_dict = checkpoint["linear_head"]
+    missing, unexpected = linear_head.load_state_dict(state_dict, strict=False)
+    print("➡️ Poids chargés (linear_head).")
+    print("❗ Paramètres manquants :", missing)
+    print("⚠️ Paramètres inattendus :", unexpected)
+
+    if k>1:
+        if "attentions" not in checkpoint:
+            raise KeyError(f"Aucune clé 'attentions' trouvée dans {checkpoint_path}")
+        state_dict = checkpoint["attentions"]
+        missing, unexpected = attentions.load_state_dict(state_dict, strict=False)
+        print("➡️ Poids chargés (attentions).")
+        print("❗ Paramètres manquants :", missing)
+        print("⚠️ Paramètres inattendus :", unexpected)
+
+
+
+ist_transformer.to(device)
+ist_transformer.train()
 
 attention.to(device)
 attention.train()
 
-# Initialisation — un module d'attention par seed
-attentions = nn.ModuleList([
-    nn.Sequential(
-        nn.LayerNorm(embed_dim),
-        nn.Linear(embed_dim, 256),
-        nn.Tanh(),
-        nn.Linear(256, 1),
-    )
-    for _ in range(k)
-])
-attentions.to(device)
-attentions.train()
+if k>1:
+    attentions.to(device)
+    attentions.train()
 
 # LINEAR PROBES
+
+linear_head.to(device)
+linear_head.train()     
 
 heads_per_seed = nn.ModuleList([
             nn.Sequential(
@@ -160,14 +226,6 @@ heads_per_seed = nn.ModuleList([
                 nn.Linear(embed_dim, 1000) 
             ) for _ in range(k)
         ])
-
-linear_head = nn.Sequential(
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, 1000),
-            )
-
-linear_head.to(device)
-linear_head.train()
 
 heads_per_seed.to(device)
 heads_per_seed.train()
@@ -185,19 +243,33 @@ os.makedirs(save_dir, exist_ok=True)
 
 
 if supervised:
-    linear_optimizer = torch.optim.AdamW(
-        [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
-        {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': attention.parameters(),       'lr': 3e-4}, #1e-5},
-        {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
-        weight_decay=1e-3, #0.04,  
-    )
+    if k>1:
+        linear_optimizer = torch.optim.AdamW(
+            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+            {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
+            {'params': attention.parameters(),       'lr': 3e-4}, #1e-5},
+            {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
+            weight_decay=1e-3, #0.04,  
+        )
+    else:
+        linear_optimizer = torch.optim.AdamW(
+            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+            {'params': attention.parameters(),       'lr': 3e-4}, #1e-5},
+            {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
+            weight_decay=1e-3, #0.04,  
+        )
 else:
-    optimizer = torch.optim.AdamW([
-        {'params': ist_transformer.parameters(), 'lr': 3e-5},
-        {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': attention.parameters(),       'lr': 3e-4},
-    ], weight_decay=1e-3)
+    if k>1:
+        optimizer = torch.optim.AdamW([
+            {'params': ist_transformer.parameters(), 'lr': 3e-5},
+            {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
+            {'params': attention.parameters(),       'lr': 3e-4},
+        ], weight_decay=1e-3)
+    else:
+        optimizer = torch.optim.AdamW([
+            {'params': ist_transformer.parameters(), 'lr': 3e-5},
+            {'params': attention.parameters(),       'lr': 1e-4},
+        ], weight_decay=1e-3)
 
     linear_optimizer = torch.optim.AdamW(
         linear_head.parameters(),
@@ -240,8 +312,6 @@ os.makedirs(save_dir, exist_ok=True)
 
 global_step = 0
 
-
-
 for epoch in range(train_epochs):  
 
     total_loss = 0
@@ -279,12 +349,15 @@ for epoch in range(train_epochs):
             loss_jepa = 0
             loss_sigreg = 0
             
-            if test :
-                for j in range(k): # seeds loop
-                    for i in range(n_student_draws):           
-                        loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
-                    if not strict_global_step:
-                        global_step += 1 # !!! TEST !!!
+            if test: 
+                if k>1:
+                    for j in range(k): # seeds loop
+                        for i in range(n_student_draws):           
+                            loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                        if not strict_global_step:
+                            global_step += 1 # !!! TEST !!!
+                else:
+                    assert False # not consistent
 
             if k > 1:
                 w_c_ref = attention(centers)                      # (B, k, 1)
@@ -315,7 +388,16 @@ for epoch in range(train_epochs):
                     if not strict_global_step:
                         global_step += 1
 
-            if cross_integration:
+            if cross_integration and k==1:
+                z_stacked = torch.stack(z_draws, dim=1)
+                w_ref = attention(z_stacked) 
+                w = torch.softmax(w_ref, dim=1) 
+                global_z_draw = (w * z_stacked).sum(dim=1)
+                if stop_gradient:
+                    loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers.detach())
+                else:
+                    loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
+            else:
                 z_seeds = []
                 z_stacked = torch.stack(z_draws, dim=1)
 
@@ -333,7 +415,10 @@ for epoch in range(train_epochs):
                 w_ref = attention(z_cross) 
                 w = torch.softmax(w_ref, dim=1) 
                 global_z_draw = (w * z_cross).sum(dim=1)
-                loss_jepa = mse(global_z_draw, z_centers)   
+                if stop_gradient:
+                    loss_jepa = mse(global_z_draw, z_centers.detach())
+                else:
+                    loss_jepa = mse(global_z_draw, z_centers)
 
             if strict_global_step:
                 global_step += 1
@@ -378,7 +463,8 @@ for epoch in range(train_epochs):
             linear_head.eval()
             heads_per_seed.eval()
             attention.eval()
-            attentions.eval()
+            if k>1:
+                attentions.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
 
@@ -424,12 +510,15 @@ for epoch in range(train_epochs):
                     loss_jepa = torch.tensor(0.).to(device)
                     loss_sigreg = torch.tensor(0.).to(device)
 
-                    if test :
-                        for j in range(k):
-                            for i in range(n_student_draws):
-                                loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # TEST : diversité sur les seeds
-                            if not strict_global_step:
-                                global_step += 1 # !!! TEST 2  !!!
+                    if test: 
+                        if k>1:
+                            for j in range(k): # seeds loop
+                                for i in range(n_student_draws):           
+                                    loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                                if not strict_global_step:
+                                    global_step += 1 # !!! TEST !!!
+                        else:
+                            assert False # not consistent
 
                     if k > 1:
                         w_c_ref = attention(centers)                      # (B, k, 1)
@@ -463,7 +552,13 @@ for epoch in range(train_epochs):
                         if not strict_global_step:
                                     global_step += 1
 
-                    if cross_integration:
+                    if cross_integration and k==1:
+                        z_stacked = torch.stack(z_draws, dim=1)
+                        w_ref = attention(z_stacked) 
+                        w = torch.softmax(w_ref, dim=1) 
+                        global_z_draw = (w * z_stacked).sum(dim=1)
+                        loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
+                    else:
                         z_seeds = []
                         z_stacked = torch.stack(z_draws, dim=1)
 
@@ -484,10 +579,8 @@ for epoch in range(train_epochs):
                         w_ref = attention(z_cross) 
                         w = torch.softmax(w_ref, dim=1) 
                         global_z_draw = (w * z_cross).sum(dim=1)
-                        if stop_gradient:
-                            loss_jepa = mse(global_z_draw, z_centers.detach())
-                        else:
-                            loss_jepa = mse(global_z_draw, z_centers)
+                        loss_jepa = mse(global_z_draw, z_centers)
+                        
 
                             
                     if strict_global_step:
@@ -513,9 +606,12 @@ for epoch in range(train_epochs):
                         if k>1 and not cross_integration:
                             print(w_c[0,...].detach().float().cpu().numpy())
                         elif cross_integration:
-                            for i in range(k):
-                                print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy())
-                            print("global", w[0,...].detach().float().cpu().numpy())
+                            if k>1:
+                                for i in range(k):
+                                    print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy())
+                                print("global", w[0,...].detach().float().cpu().numpy())
+                            else:
+                                print(w[0,...].detach().float().cpu().numpy())
                     
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
@@ -542,18 +638,27 @@ for epoch in range(train_epochs):
             linear_head.train()
             heads_per_seed.train()
             attention.train()
-            attentions.train()
+            if k>1:
+                attentions.train()
 
     if epoch % 10 == 9:
-        torch.save({
-                "epoch": epoch,
-                "history": history,
-                "ist_transformer": ist_transformer.state_dict(),
-                "attention": attention.state_dict(),
-                "attentions": attentions.state_dict(),
-                "linear_head": linear_head.state_dict()
-            },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
-        
+        if k>1:
+            torch.save({
+                    "epoch": epoch,
+                    "history": history,
+                    "ist_transformer": ist_transformer.state_dict(),
+                    "attention": attention.state_dict(),
+                    "attentions": attentions.state_dict(),
+                    "linear_head": linear_head.state_dict()
+                },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
+        else:
+            torch.save({
+                    "epoch": epoch,
+                    "history": history,
+                    "ist_transformer": ist_transformer.state_dict(),
+                    "attention": attention.state_dict(),
+                    "linear_head": linear_head.state_dict()
+                },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))     
 
     if schedule:
         scheduler.step()
