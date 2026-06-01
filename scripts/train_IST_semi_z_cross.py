@@ -70,8 +70,8 @@ strict_global_step = False
 wide_views = False
 central_integration = False
 stop_gradient = False
-cross_integration = True # cross_draws_integration
-grid = False
+cross_integration = True
+grid = True
 curriculum = False
 
 suffix = ""
