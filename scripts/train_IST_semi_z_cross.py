@@ -64,22 +64,20 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 inv_temp = 1
 supervised = False
 test = False # seed diversity
+vicreg = True # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
 wide_views = False
 central_integration = False
 stop_gradient = False
-cross_integration = True
+cross_integration = True # cross_draws_integration
 grid = False
 curriculum = False
-vicreg = True # seed diversity (like test)
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
 if test : suffix = suffix + "_TEST"
-if vicreg: 
-    suffix = suffix + "_VICREG"
-    if test : assert False # inconsistent
+if vicreg: suffix = suffix + "_VICREG"
 if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
 if central_integration : suffix = suffix + "_CENTRAL"
@@ -143,14 +141,14 @@ val_loader = DataLoader(
 ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
 
-attention = nn.Sequential(
+attention = nn.Sequential(      # seeds integration
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, 256),
             nn.Tanh(),
             nn.Linear(256, 1),
         )     
 
-if k>1:
+if k>1:                         # cross-draws integration (seed diversity)
     attentions = nn.ModuleList([
         nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -159,7 +157,13 @@ if k>1:
             nn.Linear(256, 1),
         )
         for _ in range(k)
-    ])      
+    ])    
+    seeds_attention =  nn.Sequential(      # seeds integration (draws diversity)
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )   
 
 linear_head = nn.Sequential(
                 nn.LayerNorm(embed_dim),
@@ -207,6 +211,14 @@ if curriculum:
         print("❗ Paramètres manquants :", missing)
         print("⚠️ Paramètres inattendus :", unexpected)
 
+        if "seeds_attention" not in checkpoint:
+            raise KeyError(f"Aucune clé 'seeds_attention' trouvée dans {checkpoint_path}")
+        state_dict = checkpoint["seeds_attention"]
+        missing, unexpected = seeds_attention.load_state_dict(state_dict, strict=False)
+        print("➡️ Poids chargés (seeds_attention).")
+        print("❗ Paramètres manquants :", missing)
+        print("⚠️ Paramètres inattendus :", unexpected)
+
 
 
 ist_transformer.to(device)
@@ -218,6 +230,9 @@ attention.train()
 if k>1:
     attentions.to(device)
     attentions.train()
+
+    seeds_attention.to(device)
+    seeds_attention.train()
 
 # LINEAR PROBES
 
@@ -252,6 +267,7 @@ if supervised:
             [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
             {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
             {'params': attention.parameters(),       'lr': 3e-4}, #1e-5},
+            {'params': seeds_attention.parameters(),       'lr': 3e-4}, #1e-5},
             {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
             weight_decay=1e-3, #0.04,  
         )
@@ -268,6 +284,7 @@ else:
             {'params': ist_transformer.parameters(), 'lr': 3e-5},
             {'params': attentions.parameters(),       'lr': 1e-4}, #1e-5},
             {'params': attention.parameters(),       'lr': 3e-4},
+            {'params': seeds_attention.parameters(),       'lr': 3e-4},
         ], weight_decay=1e-3)
     else:
         optimizer = torch.optim.AdamW([
@@ -361,7 +378,7 @@ for epoch in range(train_epochs):
                                 loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
                             if not strict_global_step:
                                 global_step += 1 # !!! TEST !!!
-                    else: #vicreg
+                    if vicreg:
                         for i in range(n_student_draws): 
                             loss_sigreg += vicReg_seed(output_s[i].float()) # seed diversity through vicreg
                 else:
@@ -369,16 +386,16 @@ for epoch in range(train_epochs):
 
             if k > 1:
                 w_c_ref = attention(centers)                      # (B, k, 1)
-                w = torch.softmax(w_c_ref * inv_temp, dim=1)                 # (B, k, 1)
-                z_centers = (w * centers).sum(dim=1)           # (B, d_model)
+                w = torch.softmax(w_c_ref * inv_temp, dim=1)      # seeds competition (B, k, 1)
+                z_centers = (w * centers).sum(dim=1)              # (B, d_model)
             else:
                 z_centers = centers.squeeze(dim=1)
 
             z_draws = []
             for i in range(n_student_draws):
                 if k > 1:
-                    w_ref = attention(output_s[i]) 
-                    w = torch.softmax(w_ref, dim=1) 
+                    w_ref = seeds_attention(output_s[i]) 
+                    w = torch.softmax(w_ref, dim=1) # seeds competition
                     z_draw = (w * output_s[i]).sum(dim=1)
                 else:
                     z_draw = output_s[i].squeeze(dim=1)
@@ -412,7 +429,7 @@ for epoch in range(train_epochs):
                 for seed_idx in range(k):
                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                     views_seed = z_stacked[:, :, seed_idx, :]
-
+               
                     # ABMIL spécifique à ce seed
                     w_ref = attentions[seed_idx](views_seed)        # (B, n_draws, 1)
                     w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
@@ -473,6 +490,7 @@ for epoch in range(train_epochs):
             attention.eval()
             if k>1:
                 attentions.eval()
+                seeds_attention.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
 
@@ -526,7 +544,7 @@ for epoch in range(train_epochs):
                                         loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
                                     if not strict_global_step:
                                         global_step += 1 # !!! TEST !!!
-                            else: #vicreg
+                            if vicreg:
                                 for i in range(n_student_draws): 
                                     loss_sigreg += vicReg_seed(output_s[i].float()) # seed diversity through vicreg
                         else:
@@ -542,7 +560,7 @@ for epoch in range(train_epochs):
                     z_draws = []
                     for i in range(n_student_draws):
                         if k > 1:
-                            w_ref = attention(output_s[i]) 
+                            w_ref = seeds_attention(output_s[i]) 
                             w = torch.softmax(w_ref, dim=1) 
                             z_draw = (w * output_s[i]).sum(dim=1)
                         else:
@@ -580,7 +598,6 @@ for epoch in range(train_epochs):
                             views_seed = z_stacked[:, :, seed_idx, :]
 
                             # ABMIL spécifique à ce seed
-                            w_ref = attentions[seed_idx](views_seed)        # (B, n_draws, 1)
                             w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
                             mem_w.append(w)
                             z     = (w * views_seed).sum(dim=1)             # (B, d)
@@ -635,7 +652,7 @@ for epoch in range(train_epochs):
 
                     total += labels.size(0)
 
-            print(f"Top-1 accuracy: {100 * correct / total:.2f}%")
+            print(f"Global accuracy: {100 * correct / total:.2f}%")
             for j in range(k):
                 print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
 
@@ -652,6 +669,7 @@ for epoch in range(train_epochs):
             attention.train()
             if k>1:
                 attentions.train()
+                seeds_attention.train()
 
     if epoch % 10 == 9:
         if k>1:
@@ -660,6 +678,7 @@ for epoch in range(train_epochs):
                     "history": history,
                     "ist_transformer": ist_transformer.state_dict(),
                     "attention": attention.state_dict(),
+                    "seeds_attention": seeds_attention.state_dict(),
                     "attentions": attentions.state_dict(),
                     "linear_head": linear_head.state_dict()
                 },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
