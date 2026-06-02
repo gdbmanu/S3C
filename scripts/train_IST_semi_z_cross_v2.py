@@ -64,6 +64,7 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 inv_temp = 1
 supervised = False
 test = True # seed diversity
+center_test = False # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
@@ -75,6 +76,7 @@ curriculum = False
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
+if center_test : suffix = suffix + "_CENTER"
 if test : suffix = suffix + "_TEST"
 if vicreg: suffix = suffix + "_VICREG"
 if test3 : suffix = suffix + "_TEST3"
@@ -357,8 +359,25 @@ for epoch in range(train_epochs):
         #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
-            centers = output_t.mean(dim=0)
+            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
+            #
+            if cross_integration:
+                if k == 1:
+                    assert False # not implemented
+                else:
+                    center_seeds = []
+                    for seed_idx in range(k):
+                        # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                        views_seed = output_t[:, :, seed_idx, :]
+                        w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
+                        w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
+                        z     = (w * views_seed).sum(dim=1)             # (B, d)
+                        center_seeds.append(z)
+                    centers = torch.stack(center_seeds, dim=1)
+            else:
+                centers = output_t.mean(dim=1)
+
+                    
 
             loss_jepa = 0
             loss_sigreg = 0
@@ -400,45 +419,49 @@ for epoch in range(train_epochs):
                     if not strict_global_step:
                         global_step += 1
 
-            if cross_integration and k==1:
-                z_stacked = torch.stack(z_draws, dim=1)
-                w_ref = attention(z_stacked) 
-                w = torch.softmax(w_ref, dim=1) 
-                global_z_draw = (w * z_stacked).sum(dim=1)
-                if stop_gradient:
-                    loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers.detach())
+            if cross_integration:
+                if k==1:
+                    z_stacked = torch.stack(z_draws, dim=1)
+                    w_ref = attention(z_stacked) 
+                    w = torch.softmax(w_ref, dim=1) 
+                    global_z_draw = (w * z_stacked).sum(dim=1)
+                    if stop_gradient:
+                        loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers.detach())
+                    else:
+                        loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
                 else:
-                    loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
-            else:
-                z_seeds = []
-                z_stacked = torch.stack(z_draws, dim=1)
+                    z_seeds = []
+                    z_stacked = torch.stack(z_draws, dim=1)
 
-                for seed_idx in range(k):
-                    # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                    views_seed = z_stacked[:, :, seed_idx, :]
+                    for seed_idx in range(k):
+                        # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                        views_seed = z_stacked[:, :, seed_idx, :]
 
-                    w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
-                    w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
-                    z     = (w * views_seed).sum(dim=1)             # (B, d)
-                    z_seeds.append(z)
+                        w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
+                        w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
+                        z     = (w * views_seed).sum(dim=1)             # (B, d)
+                        z_seeds.append(z)
 
-                    if test:
-                        loss_sigreg += sigreg(z.float(), global_step) # seed diversity through sigreg
-                        if not strict_global_step:
-                            global_step += 1
-             
-                z_cross = torch.stack(z_seeds, dim=1)
+                        if test:
+                            loss_sigreg += sigreg(z.float(), global_step) # seed diversity through sigreg
+                            if center_test:
+                                loss_sigreg += sigreg(centers[seed_idx].float(), global_step)
+                            if not strict_global_step:
+                                global_step += 1
+                                       
+                    z_cross = torch.stack(z_seeds, dim=1)
 
-                if vicreg:
-                    loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
+                    if vicreg:
+                        loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
 
-                w_ref = attention(z_cross) 
-                w = torch.softmax(w_ref, dim=1) 
-                global_z_draw = (w * z_cross).sum(dim=1)
-                if stop_gradient:
-                    loss_jepa = mse(global_z_draw, z_centers.detach())
-                else:
-                    loss_jepa = mse(global_z_draw, z_centers)
+                    w_ref = attention(z_cross) 
+                    w = torch.softmax(w_ref, dim=1) 
+                    global_z_draw = (w * z_cross).sum(dim=1)
+
+                    if stop_gradient:
+                        loss_jepa = mse(global_z_draw, z_centers.detach())
+                    else:
+                        loss_jepa = mse(global_z_draw, z_centers)
 
             if strict_global_step:
                 global_step += 1
@@ -525,8 +548,24 @@ for epoch in range(train_epochs):
                     #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                         output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)])
-                        centers = output_t.mean(dim=0)
+                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
+                        
+                        if cross_integration:
+                            if k == 1:
+                                assert False # not implemented
+                            else:
+                                center_seeds = []
+                                for seed_idx in range(k):
+                                    # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                                    views_seed = output_t[:, :, seed_idx, :]
+                                    w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
+                                    w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
+                                    z     = (w * views_seed).sum(dim=1)             # (B, d)
+                                    center_seeds.append(z)
+                                centers = torch.stack(center_seeds, dim=1)
+                        else:
+                            centers = output_t.mean(dim=1)
+                        #centers = output_t.mean(dim=0)
 
                     loss_jepa = torch.tensor(0.).to(device)
                     loss_sigreg = torch.tensor(0.).to(device)
@@ -571,41 +610,44 @@ for epoch in range(train_epochs):
                         if not strict_global_step:
                                     global_step += 1
 
-                    if cross_integration and k==1:
-                        z_stacked = torch.stack(z_draws, dim=1)
-                        w_ref = attention(z_stacked) 
-                        w = torch.softmax(w_ref, dim=1) 
-                        global_z_draw = (w * z_stacked).sum(dim=1)
-                        loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
-                    else:
-                        z_seeds = []
-                        z_stacked = torch.stack(z_draws, dim=1)
+                    if cross_integration :
+                        if  k== 1 :
+                            z_stacked = torch.stack(z_draws, dim=1)
+                            w_ref = attention(z_stacked) 
+                            w = torch.softmax(w_ref, dim=1) 
+                            global_z_draw = (w * z_stacked).sum(dim=1)
+                            loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers)
+                        else:
+                            z_seeds = []
+                            z_stacked = torch.stack(z_draws, dim=1)
 
-                        mem_w = []
-                        for seed_idx in range(k):
-                            # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                            views_seed = z_stacked[:, :, seed_idx, :]
+                            mem_w = []
+                            for seed_idx in range(k):
+                                # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                                views_seed = z_stacked[:, :, seed_idx, :]
 
-                            w_ref = draws_attention(views_seed) 
-                            w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
-                            mem_w.append(w)
-                            z     = (w * views_seed).sum(dim=1)             # (B, d)
-                            z_seeds.append(z)
+                                w_ref = draws_attention(views_seed) 
+                                w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
+                                mem_w.append(w)
+                                z     = (w * views_seed).sum(dim=1)             # (B, d)
+                                z_seeds.append(z)
 
-                            if test:
-                                loss_sigreg += sigreg(z.float(), global_step) # seed diversity through sigreg
-                                if not strict_global_step:
-                                    global_step += 1
+                                if test:
+                                    loss_sigreg += sigreg(z.float(), global_step) # seed diversity through sigreg
+                                    if center_test:
+                                        loss_sigreg += sigreg(centers[seed_idx].float(), global_step)
+                                    if not strict_global_step:
+                                        global_step += 1
                     
-                        z_cross = torch.stack(z_seeds, dim=1)
+                            z_cross = torch.stack(z_seeds, dim=1)
 
-                        if vicreg:
-                            loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
+                            if vicreg:
+                                loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
 
-                        w_ref = attention(z_cross) 
-                        w = torch.softmax(w_ref, dim=1) 
-                        global_z_draw = (w * z_cross).sum(dim=1)
-                        loss_jepa = mse(global_z_draw, z_centers)
+                            w_ref = attention(z_cross) 
+                            w = torch.softmax(w_ref, dim=1) 
+                            global_z_draw = (w * z_cross).sum(dim=1)
+                            loss_jepa = mse(global_z_draw, z_centers)
                             
                     if strict_global_step:
                         global_step += 1
