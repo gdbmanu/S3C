@@ -479,6 +479,8 @@ for epoch in range(train_epochs):
                     if vicreg:
                         loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
 
+                    
+
                     global_z_draw = seeds_mlp(z_cross.view(batch_size, k*embed_dim))
                     pred_seeds = inv_seeds_mlp(global_z_draw).view(batch_size, k, embed_dim)
 
@@ -490,7 +492,17 @@ for epoch in range(train_epochs):
                         #loss_jepa = mse(global_z_draw, z_centers.detach())
                         loss_jepa = mse(pred_seeds, centers.detach())
                     else:
-                        loss_jepa = mse(pred_seeds, centers)
+                        #loss_jepa = mse(pred_seeds, centers)
+                        M = torch.ones(batch_size, k, 1).to(device)
+                        mask_idx = torch.randint(0, k, (batch_size,))
+                        M[torch.arange(batch_size), mask_idx, 0] = 0
+                        se = (pred_seeds - centers) ** 2 # (B, k, d)
+                        mse_per_vec = se.mean(dim=-1, keepdim=True)
+                        loss_visible = (mse_per_vec * M).sum() / M.sum()
+                        loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
+                        gamma = pred_seeds.var().detach()
+                        loss_hinge = torch.relu(gamma - loss_masked)
+                        loss_jepa = loss_visible + loss_hinge
 
             if strict_global_step:
                 global_step += 1
@@ -676,7 +688,17 @@ for epoch in range(train_epochs):
                                     #loss_jepa = mse(global_z_draw, z_centers.detach())
                                     loss_jepa = mse(pred_seeds, centers.detach())
                                 else:
-                                    loss_jepa = mse(pred_seeds, centers)
+                                    #loss_jepa = mse(pred_seeds, centers)
+                                    M = torch.ones(batch_size, k, 1).to(device)
+                                    mask_idx = torch.randint(0, k, (batch_size,))
+                                    M[torch.arange(batch_size), mask_idx, 0] = 0
+                                    se = (pred_seeds - centers) ** 2 # (B, k, d)
+                                    mse_per_vec = se.mean(dim=-1, keepdim=True)
+                                    loss_visible = (mse_per_vec * M).sum() / M.sum()
+                                    loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
+                                    gamma = pred_seeds.var().detach()
+                                    loss_hinge = torch.relu(gamma - loss_masked)
+                                    loss_jepa = loss_visible + loss_hinge
 
                         if strict_global_step:
                             global_step += 1
