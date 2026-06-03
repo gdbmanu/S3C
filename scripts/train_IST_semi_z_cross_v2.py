@@ -72,7 +72,8 @@ test3 = False # no sample diversity
 strict_global_step = False
 wide_views = False
 cross_integration = True # cross_draws_integration
-grid = False
+
+grid = True
 curriculum = False
 
 suffix = ""
