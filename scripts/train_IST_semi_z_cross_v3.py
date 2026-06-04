@@ -60,6 +60,7 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
+gam = 0.3            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
@@ -94,7 +95,7 @@ if grid :
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 
-save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_v3"
+save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_gam{gam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_v3"
 
 # Monter le dossier distant
 local=True
@@ -503,7 +504,7 @@ for epoch in range(train_epochs):
                         loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
                         gamma = pred_seeds.var().detach()
                         loss_hinge = torch.relu(gamma - loss_masked)
-                        loss_jepa = loss_visible + loss_hinge
+                        loss_jepa = loss_visible +  gam * loss_hinge
 
             if strict_global_step:
                 global_step += 1
@@ -699,7 +700,7 @@ for epoch in range(train_epochs):
                                     loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
                                     gamma = pred_seeds.var().detach()
                                     loss_hinge = torch.relu(gamma - loss_masked)
-                                    loss_jepa = loss_visible + loss_hinge
+                                    loss_jepa = loss_visible + gam * loss_hinge
 
                         if strict_global_step:
                             global_step += 1
