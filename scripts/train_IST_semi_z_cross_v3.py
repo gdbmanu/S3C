@@ -54,7 +54,7 @@ k = 3       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
-n_uplet_student = 3
+n_uplet_student = 1
 n_uplet_teacher = 9 #5
 n_student_draws = 6
 n_teacher_draws = 2
@@ -77,7 +77,7 @@ strict_global_step = False
 wide_views = False
 cross_integration = True # cross_draws_integration
 
-grid = False
+grid = True
 curriculum = False
 
 suffix = ""
@@ -519,6 +519,7 @@ for epoch in range(train_epochs):
                             loss_masked = (mse_per_vec * (1 - M)).sum() / num_masked
                             gamma = pred_seeds.var().detach()
                             loss_hinge = torch.relu(gamma - loss_masked)
+                            #loss_hinge = torch.relu(1 - loss_masked)
                         else:
                             loss_hinge = torch.tensor(0.0, device=z.device)
                         loss_jepa = loss_visible + loss_hinge"""
@@ -740,6 +741,7 @@ for epoch in range(train_epochs):
                                         loss_masked = (mse_per_vec * (1 - M)).sum() / num_masked
                                         gamma = pred_seeds.var().detach()
                                         loss_hinge = torch.relu(gamma - loss_masked)
+                                        #loss_hinge = torch.relu(1 - loss_masked)
                                     else:
                                         loss_hinge = torch.tensor(0.0, device=z.device)
                                     loss_jepa = loss_visible + loss_hinge"""
