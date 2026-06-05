@@ -61,7 +61,7 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.5            # contrastive mse
+gam = 0.3            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
@@ -156,8 +156,8 @@ draws_attention = nn.Sequential(
 # LINEAR PROBE
 
 linear_head = nn.Sequential(
-                nn.LayerNorm(bottleneck_dim),
-                nn.Linear(bottleneck_dim, 1000),
+                nn.LayerNorm(k * embed_dim),
+                nn.Linear(k * embed_dim, 1000),
             )
 
 if k>1:                                     # cross-draws integration (seed diversity)
@@ -543,7 +543,8 @@ for epoch in range(train_epochs):
                 output_t_head = linear_head(z_centers)
                 loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + criterion(output_t_head, labels)
             else:
-                output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                #output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
@@ -756,7 +757,9 @@ for epoch in range(train_epochs):
                                 preds = output_t_seed.argmax(dim=1)
                                 seeds_correct[j] += (preds == labels).sum().item()
 
-                        output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        #output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+
                         loss_label = criterion(output_t_head, labels)
 
                         loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
