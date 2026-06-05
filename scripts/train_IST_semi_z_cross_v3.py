@@ -42,6 +42,7 @@ num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 embed_dim = 768
+bottleneck_dim = 256
 
 epoch_teacher = 20
 
@@ -49,7 +50,7 @@ zoom = 1.5
 std = 0.5 / zoom 
 
 n_sab = 2
-k = 1       # n_seeds
+k = 3       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -60,14 +61,14 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.3            # contrastive mse
+gam = 0.5            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
 
 supervised = False
 test = True # seed diversity
-center_test = False # center seed consistency
+center_test = True # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
@@ -79,8 +80,9 @@ curriculum = False
 
 suffix = ""
 if supervised : suffix = suffix + "_SUP"
-if center_test : suffix = suffix + "_CENTER"
 if test : suffix = suffix + "_TEST"
+if center_test : suffix = suffix + "_CENTER"
+
 if vicreg: suffix = suffix + "_VICREG"
 if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
@@ -154,8 +156,8 @@ draws_attention = nn.Sequential(
 # LINEAR PROBE
 
 linear_head = nn.Sequential(
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, 1000),
+                nn.LayerNorm(bottleneck_dim),
+                nn.Linear(bottleneck_dim, 1000),
             )
 
 if k>1:                                     # cross-draws integration (seed diversity)
@@ -166,18 +168,19 @@ if k>1:                                     # cross-draws integration (seed dive
             nn.Tanh(),
             nn.Linear(256, 1),
         )   
+    
     seeds_mlp = nn.Sequential(      # seeds integration
             nn.LayerNorm(k * embed_dim),
             nn.Linear(k * embed_dim, k * embed_dim),
             nn.ReLU(),
             nn.Linear(k * embed_dim, k * embed_dim),
             nn.ReLU(),
-            nn.Linear(k * embed_dim, embed_dim),
+            nn.Linear(k * embed_dim, bottleneck_dim),
         )   
 
     inv_seeds_mlp = nn.Sequential(      # seeds integration
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, k * embed_dim),
+            nn.LayerNorm(bottleneck_dim),
+            nn.Linear(bottleneck_dim, k * embed_dim),
             nn.ReLU(),
             nn.Linear(k * embed_dim, k * embed_dim),
             nn.ReLU(),
