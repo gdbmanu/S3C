@@ -54,7 +54,7 @@ k = 3       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
-n_uplet_student = 1
+n_uplet_student = 3
 n_uplet_teacher = 9 #5
 n_student_draws = 6
 n_teacher_draws = 2
