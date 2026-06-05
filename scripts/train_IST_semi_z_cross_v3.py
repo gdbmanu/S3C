@@ -49,7 +49,7 @@ zoom = 1.5
 std = 0.5 / zoom 
 
 n_sab = 2
-k = 3
+k = 1       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -60,7 +60,7 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.2            # contrastive mse
+gam = 0.3            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
@@ -402,7 +402,7 @@ for epoch in range(train_epochs):
                 if k == 1:
                     w_ref = draws_attention(output_t.squeeze(dim=2)) 
                     w = torch.softmax(w_ref, dim=1) 
-                    global_z_draw = (w * z_stacked).sum(dim=1)
+                    global_z_draw = (w * output_t.squeeze(dim=2)).sum(dim=1)
                 else:
                     center_seeds = []
                     for seed_idx in range(k):
@@ -424,7 +424,7 @@ for epoch in range(train_epochs):
             if k > 1:
                 z_centers = seeds_mlp(centers.view(batch_size, k*embed_dim))
             else:
-                z_centers = centers.squeeze(dim=1)
+                z_centers = global_z_draw.squeeze(dim=1)
 
             z_draws = []
             for i in range(n_student_draws):
@@ -495,7 +495,7 @@ for epoch in range(train_epochs):
                         loss_jepa = mse(pred_seeds, centers.detach())
                     else:
                         #loss_jepa = mse(pred_seeds, centers)
-                        """M = torch.ones(batch_size, k, 1).to(device)
+                        M = torch.ones(batch_size, k, 1).to(device)
                         mask_idx = torch.randint(0, k, (batch_size,))
                         M[torch.arange(batch_size), mask_idx, 0] = 0
                         se = (pred_seeds - centers) ** 2 # (B, k, d)
@@ -504,8 +504,8 @@ for epoch in range(train_epochs):
                         loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
                         gamma = pred_seeds.var().detach()
                         loss_hinge = torch.relu(gamma - loss_masked)
-                        loss_jepa = loss_visible + gam * loss_hinge"""
-                        p_mask = gam
+                        loss_jepa = loss_visible + gam * loss_hinge
+                        """p_mask = gam
                         proba_matrix = torch.full((batch_size, k, 1), 1 - p_mask)
                         M = torch.bernoulli(proba_matrix).to(device)
                         se = (pred_seeds - centers) ** 2 # (B, k, d)
@@ -522,7 +522,7 @@ for epoch in range(train_epochs):
                             loss_hinge = torch.relu(gamma - loss_masked)
                         else:
                             loss_hinge = torch.tensor(0.0, device=z.device)
-                        loss_jepa = loss_visible + loss_hinge
+                        loss_jepa = loss_visible + loss_hinge"""
 
             if strict_global_step:
                 global_step += 1
@@ -558,8 +558,8 @@ for epoch in range(train_epochs):
         if k>1:
             seeds_optimizer.zero_grad()
             loss_seeds.backward()
-        #grad_norm = torch.nn.utils.clip_grad_norm_(seeds_optimizer.parameters(), 1.0)
-        seeds_optimizer.step()
+            #grad_norm = torch.nn.utils.clip_grad_norm_(seeds_optimizer.parameters(), 1.0)
+            seeds_optimizer.step()
 
         total_loss += loss.item()
     
@@ -567,11 +567,11 @@ for epoch in range(train_epochs):
 
             ist_transformer.eval()
             linear_head.eval()
-            heads_per_seed.eval()
             draws_attention.eval()
             if k>1:
                 seeds_mlp.eval()                
                 seeds_attention.eval()
+                heads_per_seed.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
             history["epoch"].append(epoch + 1)
@@ -616,7 +616,7 @@ for epoch in range(train_epochs):
                             if k == 1:
                                 w_ref = draws_attention(output_t.squeeze(dim=2)) 
                                 w = torch.softmax(w_ref, dim=1) 
-                                global_z_draw = (w * z_stacked).sum(dim=1)
+                                global_z_draw = (w * output_t.squeeze(dim=2)).sum(dim=1)
                             else:
                                 center_seeds = []
                                 for seed_idx in range(k):
@@ -638,7 +638,7 @@ for epoch in range(train_epochs):
                         if k > 1:
                             z_centers = seeds_mlp(centers.view(batch_size, k*embed_dim))
                         else:
-                            z_centers = centers.squeeze(dim=1)
+                            z_centers = global_z_draw.squeeze(dim=1)
 
                         z_draws = []
                         for i in range(n_student_draws):
@@ -709,7 +709,7 @@ for epoch in range(train_epochs):
                                     loss_jepa = mse(pred_seeds, centers.detach())
                                 else:
                                     #loss_jepa = mse(pred_seeds, centers)
-                                    """M = torch.ones(batch_size, k, 1).to(device)
+                                    M = torch.ones(batch_size, k, 1).to(device)
                                     mask_idx = torch.randint(0, k, (batch_size,))
                                     M[torch.arange(batch_size), mask_idx, 0] = 0
                                     se = (pred_seeds - centers) ** 2 # (B, k, d)
@@ -718,8 +718,8 @@ for epoch in range(train_epochs):
                                     loss_masked = (mse_per_vec * (1 - M)).sum() / (1 - M).sum()
                                     gamma = pred_seeds.var().detach()
                                     loss_hinge = torch.relu(gamma - loss_masked)
-                                    loss_jepa = loss_visible + gam * loss_hinge"""
-                                    p_mask = gam
+                                    loss_jepa = loss_visible + gam * loss_hinge
+                                    """p_mask = gam
                                     proba_matrix = torch.full((batch_size, k, 1), 1 - p_mask)
                                     M = torch.bernoulli(proba_matrix).to(device)
                                     se = (pred_seeds - centers) ** 2 # (B, k, d)
@@ -736,7 +736,7 @@ for epoch in range(train_epochs):
                                         loss_hinge = torch.relu(gamma - loss_masked)
                                     else:
                                         loss_hinge = torch.tensor(0.0, device=z.device)
-                                    loss_jepa = loss_visible + gam * loss_hinge
+                                    loss_jepa = loss_visible + gam * loss_hinge"""
                                     
 
                         if strict_global_step:
@@ -793,11 +793,11 @@ for epoch in range(train_epochs):
 
             ist_transformer.train()
             linear_head.train()
-            heads_per_seed.train()
             draws_attention.train()
             if k>1:
                 seeds_mlp.train()
                 seeds_attention.train()
+                heads_per_seed.train()
 
     if epoch % 10 == 9:
         if k>1:
