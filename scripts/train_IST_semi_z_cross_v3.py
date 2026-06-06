@@ -59,7 +59,7 @@ n_uplet_teacher = 9 #5
 n_student_draws = 6
 n_teacher_draws = 2
 
-train_epochs = 30
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 gam = 0.            # contrastive mse
 
