@@ -61,7 +61,7 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.5            # contrastive mse
+gam = 1            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
