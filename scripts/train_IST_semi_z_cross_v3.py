@@ -42,7 +42,7 @@ num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 embed_dim = 768
-bottleneck_dim = 256
+bottleneck_dim = 768
 
 epoch_teacher = 20
 
@@ -61,14 +61,14 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.3            # contrastive mse
+gam = 0.5            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
 
 supervised = False
 test = True # seed diversity
-center_test = True # center seed consistency
+center_test = False # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
@@ -96,6 +96,7 @@ if grid :
     n_saccades_max = 121
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
+if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 
 save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_gam{gam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_v3"
 
@@ -481,12 +482,17 @@ for epoch in range(train_epochs):
                                        
                     z_cross = torch.stack(z_seeds, dim=1)
 
+                    M = torch.ones(batch_size, k, 1).to(device)
+                    mask_idx = torch.randint(0, k, (batch_size,))
+                    M[torch.arange(batch_size), mask_idx, 0] = 0
+                    z_masked = z_cross * M
+
                     if vicreg:
                         loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
 
                     
 
-                    global_z_draw = seeds_mlp(z_cross.view(batch_size, k*embed_dim))
+                    global_z_draw = seeds_mlp(z_masked.view(batch_size, k*embed_dim))
                     pred_seeds = inv_seeds_mlp(global_z_draw).view(batch_size, k, embed_dim)
 
                     #loss_sigreg += sigreg(global_z_draw.float(), global_step)
@@ -498,9 +504,7 @@ for epoch in range(train_epochs):
                         loss_jepa = mse(pred_seeds, centers.detach())
                     else:
                         #loss_jepa = mse(pred_seeds, centers)
-                        M = torch.ones(batch_size, k, 1).to(device)
-                        mask_idx = torch.randint(0, k, (batch_size,))
-                        M[torch.arange(batch_size), mask_idx, 0] = 0
+                        
                         se = (pred_seeds - centers) ** 2 # (B, k, d)
                         mse_per_vec = se.mean(dim=-1, keepdim=True)
                         loss_visible = (mse_per_vec * M).sum() / M.sum()
@@ -540,7 +544,8 @@ for epoch in range(train_epochs):
                     loss_seeds += criterion(output_t_seed, labels)
 
             if supervised:
-                output_t_head = linear_head(z_centers)
+                #output_t_head = linear_head(z_centers)
+                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                 loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
@@ -698,10 +703,16 @@ for epoch in range(train_epochs):
                                                 
                                 z_cross = torch.stack(z_seeds, dim=1)
 
+                                M = torch.ones(batch_size, k, 1).to(device)
+                                mask_idx = torch.randint(0, k, (batch_size,))
+                                M[torch.arange(batch_size), mask_idx, 0] = 0
+                                z_masked = z_cross * M
+
+
                                 if vicreg:
                                     loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
 
-                                global_z_draw = seeds_mlp(z_cross.view(batch_size, k*embed_dim))
+                                global_z_draw = seeds_mlp(z_masked.view(batch_size, k*embed_dim))
                                 pred_seeds = inv_seeds_mlp(global_z_draw).view(batch_size, k, embed_dim)
 
                                 #loss_sigreg += sigreg(global_z_draw.float(), global_step)
@@ -713,9 +724,6 @@ for epoch in range(train_epochs):
                                     loss_jepa = mse(pred_seeds, centers.detach())
                                 else:
                                     #loss_jepa = mse(pred_seeds, centers)
-                                    M = torch.ones(batch_size, k, 1).to(device)
-                                    mask_idx = torch.randint(0, k, (batch_size,))
-                                    M[torch.arange(batch_size), mask_idx, 0] = 0
                                     se = (pred_seeds - centers) ** 2 # (B, k, d)
                                     mse_per_vec = se.mean(dim=-1, keepdim=True)
                                     loss_visible = (mse_per_vec * M).sum() / M.sum()
