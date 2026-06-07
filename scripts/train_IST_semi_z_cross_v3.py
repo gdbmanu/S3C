@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torchvision import datasets
 
 
-from s3c.models.heads import IterativeSeedTransformer #FovealSetTransformer
+from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
 
@@ -61,7 +61,7 @@ n_teacher_draws = 2
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
-gam = 0.4            # contrastive mse
+gam = 0.5            # contrastive mse
 
 inv_temp = 1
 stop_gradient = False
@@ -147,12 +147,7 @@ ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_di
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab)
 
 
-draws_attention = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, 256),
-            nn.Tanh(),
-            nn.Linear(256, 1),
-        )
+draws_attention = AttentionPooling(embed_dim)
 
 # LINEAR PROBE
 
@@ -163,12 +158,7 @@ linear_head = nn.Sequential(
 
 if k>1:                                     # cross-draws integration (seed diversity)
     
-    seeds_attention =  nn.Sequential(      # seeds integration (draws diversity)
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, 256),
-            nn.Tanh(),
-            nn.Linear(256, 1),
-        )   
+    seeds_attention = AttentionPooling(embed_dim)
     
     seeds_mlp = nn.Sequential(      # seeds integration
             nn.LayerNorm(k * embed_dim),
@@ -404,17 +394,12 @@ for epoch in range(train_epochs):
             #
             if cross_integration:
                 if k == 1:
-                    w_ref = draws_attention(output_t.squeeze(dim=2)) 
-                    w = torch.softmax(w_ref, dim=1) 
-                    global_z_draw = (w * output_t.squeeze(dim=2)).sum(dim=1)
+                    global_z_draw, _ = draws_attention(output_t.squeeze(dim=2)) 
                 else:
                     center_seeds = []
                     for seed_idx in range(k):
                         # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                        views_seed = output_t[:, :, seed_idx, :]
-                        w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
-                        w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
-                        z     = (w * views_seed).sum(dim=1)             # (B, d)
+                        z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
                         center_seeds.append(z)
                     centers = torch.stack(center_seeds, dim=1)
             else:
@@ -433,9 +418,7 @@ for epoch in range(train_epochs):
             z_draws = []
             for i in range(n_student_draws):
                 if k > 1:
-                    w_ref = seeds_attention(output_s[i]) 
-                    w = torch.softmax(w_ref, dim=1) # seeds competition
-                    z_draw = (w * output_s[i]).sum(dim=1)
+                    z_draw, _ = seeds_attention(output_s[i]) 
                 else:
                     z_draw = output_s[i].squeeze(dim=1)
                 if not cross_integration:
@@ -453,9 +436,7 @@ for epoch in range(train_epochs):
             if cross_integration:
                 if k==1:
                     z_stacked = torch.stack(z_draws, dim=1)
-                    w_ref = draws_attention(z_stacked) 
-                    w = torch.softmax(w_ref, dim=1) 
-                    global_z_draw = (w * z_stacked).sum(dim=1)
+                    global_z_draw, _ = draws_attention(z_stacked) 
                     if stop_gradient:
                         loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers.detach())
                     else:
@@ -468,9 +449,7 @@ for epoch in range(train_epochs):
                         # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                         views_seed = z_stacked[:, :, seed_idx, :]
 
-                        w_ref = draws_attention(views_seed)             # (B, n_draws, 1)
-                        w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
-                        z     = (w * views_seed).sum(dim=1)             # (B, d)
+                        z, _ = draws_attention(views_seed)             # (B, n_draws, 1)
                         z_seeds.append(z)
 
                         if test:
@@ -629,17 +608,13 @@ for epoch in range(train_epochs):
                         #
                         if cross_integration:
                             if k == 1:
-                                w_ref = draws_attention(output_t.squeeze(dim=2)) 
-                                w = torch.softmax(w_ref, dim=1) 
-                                global_z_draw = (w * output_t.squeeze(dim=2)).sum(dim=1)
+                                global_z_draw, _ = draws_attention(output_t.squeeze(dim=2)) 
                             else:
                                 center_seeds = []
                                 for seed_idx in range(k):
                                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                                     views_seed = output_t[:, :, seed_idx, :]
-                                    w_ref = draws_attention(views_seed)        # (B, n_draws, 1)
-                                    w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
-                                    z     = (w * views_seed).sum(dim=1)             # (B, d)
+                                    z, _ = draws_attention(views_seed)        # (B, n_draws, 1)
                                     center_seeds.append(z)
                                 centers = torch.stack(center_seeds, dim=1)
                         else:
@@ -658,9 +633,7 @@ for epoch in range(train_epochs):
                         z_draws = []
                         for i in range(n_student_draws):
                             if k > 1:
-                                w_ref = seeds_attention(output_s[i]) 
-                                w = torch.softmax(w_ref, dim=1) # seeds competition
-                                z_draw = (w * output_s[i]).sum(dim=1)
+                                z_draw, _ = seeds_attention(output_s[i]) 
                             else:
                                 z_draw = output_s[i].squeeze(dim=1)
                             if not cross_integration:
@@ -678,9 +651,7 @@ for epoch in range(train_epochs):
                         if cross_integration:
                             if k==1:
                                 z_stacked = torch.stack(z_draws, dim=1)
-                                w_ref = draws_attention(z_stacked) 
-                                w = torch.softmax(w_ref, dim=1) 
-                                global_z_draw = (w * z_stacked).sum(dim=1)
+                                global_z_draw, w = draws_attention(z_stacked) 
                                 if stop_gradient:
                                     loss_jepa = mse(global_z_draw.squeeze(dim=1), z_centers.detach())
                                 else:
@@ -694,10 +665,8 @@ for epoch in range(train_epochs):
                                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                                     views_seed = z_stacked[:, :, seed_idx, :]
 
-                                    w_ref = draws_attention(views_seed)             # (B, n_draws, 1)
-                                    w     = torch.softmax(w_ref, dim=1)             # softmax sur n_draws
+                                    z, w = draws_attention(views_seed)             # (B, n_draws, 1)
                                     mem_w.append(w)
-                                    z     = (w * views_seed).sum(dim=1)             # (B, d)
                                     z_seeds.append(z)
 
                                     if test:
