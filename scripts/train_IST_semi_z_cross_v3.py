@@ -491,11 +491,10 @@ for epoch in range(train_epochs):
                     M = torch.bernoulli(proba_matrix).to(device)
 
                     z_masked = z_cross * M
+                    z_centers_masked = centers * M
 
                     if vicreg:
                         loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
-
-                    
 
                     global_z_draw = seeds_mlp(z_masked.view(batch_size, k*embed_dim))
                     pred_seeds = inv_seeds_mlp(global_z_draw).view(batch_size, k, embed_dim)
@@ -509,6 +508,7 @@ for epoch in range(train_epochs):
                         loss_jepa = mse(pred_seeds, centers.detach())
                     else:
                         #loss_jepa = mse(pred_seeds, centers)
+                        loss_jepa = mse(pred_seeds, z_centers_masked)
                         
                         """se = (pred_seeds - centers) ** 2 # (B, k, d)
                         mse_per_vec = se.mean(dim=-1, keepdim=True)
@@ -520,7 +520,8 @@ for epoch in range(train_epochs):
                         """p_mask = gam
                         proba_matrix = torch.full((batch_size, k, 1), 1 - p_mask)
                         M = torch.bernoulli(proba_matrix).to(device)"""
-                        se = (pred_seeds - centers) ** 2 # (B, k, d)
+                        
+                        """se = (pred_seeds - centers) ** 2 # (B, k, d)
                         mse_per_vec = se.mean(dim=-1, keepdim=True)
                         num_visible = M.sum()
                         if num_visible > 0:
@@ -534,7 +535,7 @@ for epoch in range(train_epochs):
                             loss_hinge = torch.relu(gamma - loss_masked)
                         else:
                             loss_hinge = torch.tensor(0.0, device=z.device)
-                        loss_jepa = loss_visible + loss_hinge
+                        loss_jepa = loss_visible + loss_hinge"""
 
             if strict_global_step:
                 global_step += 1
@@ -717,7 +718,7 @@ for epoch in range(train_epochs):
                                 M = torch.bernoulli(proba_matrix).to(device)
 
                                 z_masked = z_cross * M
-
+                                z_centers_masked = centers * M
 
                                 if vicreg:
                                     loss_sigreg += vicReg_seed(z_cross.float()) # seed diversity through vicreg
@@ -734,6 +735,7 @@ for epoch in range(train_epochs):
                                     loss_jepa = mse(pred_seeds, centers.detach())
                                 else:
                                     #loss_jepa = mse(pred_seeds, centers)
+                                    loss_jepa = mse(pred_seeds, z_centers_masked)
                                     """se = (pred_seeds - centers) ** 2 # (B, k, d)
                                     mse_per_vec = se.mean(dim=-1, keepdim=True)
                                     loss_visible = (mse_per_vec * M).sum() / M.sum()
@@ -744,7 +746,8 @@ for epoch in range(train_epochs):
                                     """p_mask = gam
                                     proba_matrix = torch.full((batch_size, k, 1), 1 - p_mask)
                                     M = torch.bernoulli(proba_matrix).to(device)"""
-                                    se = (pred_seeds - centers) ** 2 # (B, k, d)
+
+                                    """se = (pred_seeds - centers) ** 2 # (B, k, d)
                                     mse_per_vec = se.mean(dim=-1, keepdim=True)
                                     num_visible = M.sum()
                                     if num_visible > 0:
@@ -758,7 +761,7 @@ for epoch in range(train_epochs):
                                         loss_hinge = torch.relu(gamma - loss_masked)
                                     else:
                                         loss_hinge = torch.tensor(0.0, device=z.device)
-                                    loss_jepa = loss_visible + loss_hinge
+                                    loss_jepa = loss_visible + loss_hinge"""
                                     
 
                         if strict_global_step:
