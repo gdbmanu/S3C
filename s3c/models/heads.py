@@ -210,8 +210,8 @@ class AttentionPooling(nn.Module):
 
     def forward(self, z):
         # z: (B, n, d)
-        z = self.z_norm(z)
-        w = self.attn(z)          # (B, n, 1)
+        # z = self.z_norm(z)
+        w = self.attn(self.z_norm(z))          # (B, n, 1)
         w = torch.softmax(w, dim=1)
         return (w * z).sum(dim=1), w # (B, d)
                 
