@@ -63,7 +63,7 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 gam = 0.            # contrastive mse
 
-inv_temp = 1
+inv_temp = 0.3
 stop_gradient = False
 
 self_att = True
@@ -152,7 +152,7 @@ ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_di
                  n_heads=n_heads, n_seeds=k, n_blocks=n_sab, self_att=self_att)
 
 
-draws_attention = AttentionPooling(embed_dim)
+draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 
 # LINEAR PROBE
 

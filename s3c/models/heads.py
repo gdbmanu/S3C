@@ -199,7 +199,7 @@ class FovealSetTransformer(nn.Module):
                 
 class AttentionPooling(nn.Module):
     """Gated attention pooling à la ABMIL (Ilse et al. 2018)"""
-    def __init__(self, d_model, hidden=256):
+    def __init__(self, d_model, hidden=256, inv_temp = 1.):
         super().__init__()
         self.attn = nn.Sequential(
             nn.Linear(d_model, hidden),
@@ -207,13 +207,14 @@ class AttentionPooling(nn.Module):
             nn.Linear(hidden, 1),
         )
         self.z_norm = nn.LayerNorm(d_model)
+        self.inv_temp = inv_temp
 
     def forward(self, z):
         # z: (B, n, d)
         # z = self.z_norm(z)
         w = self.attn(self.z_norm(z))          # (B, n, 1)
         w = torch.softmax(w, dim=1)
-        return (w * z).sum(dim=1), w # (B, d)
+        return (w * z * self.inv_temp).sum(dim=1), w # (B, d)
                 
 
 class SeedBlock(nn.Module):
