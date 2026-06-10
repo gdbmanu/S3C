@@ -49,18 +49,19 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 4
-self_att = True
+n_sab = 2
+self_att = False
 
 k = 3       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
 n_uplet_student = 3
-n_uplet_teacher = 3 #5
+n_uplet_teacher = 5
 n_student_draws = 5
-n_teacher_draws = 5
+n_teacher_draws = 3
 
+orig = True
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
@@ -68,9 +69,8 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 inv_temp = 1
 stop_gradient = False
 
-
 supervised = False
-test = True # seed diversity
+test = False # seed diversity
 center_test = False # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
@@ -104,16 +104,25 @@ if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 
+if orig: suffix = suffix + "_ORIG"
+
 save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_v4"
 
 # Monter le dossier distant
-local=True
+local=False
 if local == False:
     if grid: 
         mount_point = os.path.expanduser("~/imagenet_grid")
         try:
             os.makedirs(mount_point, exist_ok=True)
             subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_grid_Z", mount_point, "-o", "reconnect"], check=True)
+        except:
+            pass
+    elif orig: 
+        mount_point = os.path.expanduser("~/imagenet_orig")
+        try:
+            os.makedirs(mount_point, exist_ok=True)
+            subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig", mount_point, "-o", "reconnect"], check=True)
         except:
             pass
     else:
@@ -129,6 +138,9 @@ else:
     if grid:
         train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
+    elif orig:
+        train_dir = "data/Imagenet_Z_orig/train"   # Imagenet Validation set
+        val_dir = "data/Imagenet_Z_orig/val"   # Imagenet Validation set
     else:
         train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
@@ -162,9 +174,7 @@ linear_head = nn.Sequential(
                 nn.Linear(k * embed_dim, 1000),
             )
 
-if k>1:                                     # cross-draws integration (seed diversity)
-        
-    seeds_mlp = nn.Sequential(      # seeds integration
+seeds_mlp = nn.Sequential(      # seeds integration
             nn.LayerNorm(k * embed_dim),
             nn.Linear(k * embed_dim, k * embed_dim),
             nn.ReLU(),
@@ -172,6 +182,8 @@ if k>1:                                     # cross-draws integration (seed dive
             nn.ReLU(),
             nn.Linear(k * embed_dim, bottleneck_dim),
         )   
+
+if k>1:                                     # cross-draws integration (seed diversity)
 
     # LINEAR PROBES
 
@@ -213,15 +225,13 @@ if curriculum:
     print("❗ Paramètres manquants :", missing)
     print("⚠️ Paramètres inattendus :", unexpected)
 
-    if k>1:
-
-        if "seeds_mlp" not in checkpoint:
-            raise KeyError(f"Aucune clé 'seeds_mlp' trouvée dans {checkpoint_path}")
-        state_dict = checkpoint["seeds_mlp"]
-        missing, unexpected = seeds_mlp.load_state_dict(state_dict, strict=False)
-        print("➡️ Poids chargés (seeds_mlp).")
-        print("❗ Paramètres manquants :", missing)
-        print("⚠️ Paramètres inattendus :", unexpected)
+    if "seeds_mlp" not in checkpoint:
+        raise KeyError(f"Aucune clé 'seeds_mlp' trouvée dans {checkpoint_path}")
+    state_dict = checkpoint["seeds_mlp"]
+    missing, unexpected = seeds_mlp.load_state_dict(state_dict, strict=False)
+    print("➡️ Poids chargés (seeds_mlp).")
+    print("❗ Paramètres manquants :", missing)
+    print("⚠️ Paramètres inattendus :", unexpected)
 
 
 ist_transformer.to(device)
@@ -233,45 +243,31 @@ draws_attention.train()
 # LINEAR PROBE
 
 linear_head.to(device)
-linear_head.train()     
+linear_head.train()   
+
+seeds_mlp.to(device)
+seeds_mlp.train()
 
 if k>1:
-    seeds_mlp.to(device)
-    seeds_mlp.train()
-
     heads_per_seed.to(device)
     heads_per_seed.train()
 
 os.makedirs(save_dir, exist_ok=True)
 
 if supervised:
-    if k>1:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
-            {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
-            weight_decay=1e-3, #0.04,  
-        )
-    else:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
-            {'params': draws_attention.parameters(),       'lr': 3e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
-            weight_decay=1e-3, #0.04,  
-        )
+    linear_optimizer = torch.optim.AdamW(
+        [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+        {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
+        {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
+        {'params': linear_head.parameters(), 'lr': 3e-4}], #3e-6}], #1e-4}],
+        weight_decay=1e-3, #0.04,  
+    )
 else:
-    if k>1:
-        optimizer = torch.optim.AdamW([
-            {'params': ist_transformer.parameters(), 'lr': 3e-5},
-            {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': seeds_mlp.parameters(),       'lr': 3e-4},
-        ], weight_decay=1e-3)
-    else:
-        optimizer = torch.optim.AdamW([
-            {'params': ist_transformer.parameters(), 'lr': 3e-5},
-            {'params': draws_attention.parameters(),       'lr': 1e-4},
-        ], weight_decay=1e-3)
+    optimizer = torch.optim.AdamW([
+        {'params': ist_transformer.parameters(), 'lr': 3e-5},
+        {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
+        {'params': seeds_mlp.parameters(),       'lr': 3e-4},
+    ], weight_decay=1e-3)
 
     linear_optimizer = torch.optim.AdamW(
         linear_head.parameters(),
@@ -350,7 +346,8 @@ for epoch in range(train_epochs):
             #
             if cross_integration:
                 if k == 1:
-                    global_z_draw, _ = draws_attention(output_t.squeeze(dim=2)) 
+                    centers, _ = draws_attention(output_t.squeeze(dim=2)) 
+                    z_center = seeds_mlp(centers)
                 else:
                     center_seeds = []
                     for seed_idx in range(k):
@@ -358,18 +355,13 @@ for epoch in range(train_epochs):
                         z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
                         center_seeds.append(z)
                     centers = torch.stack(center_seeds, dim=1)
+                    z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
             else:
                 centers = output_t.mean(dim=1)
-
+                z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
 
             loss_jepa = 0
             loss_sigreg = 0
-
-            if k > 1:
-                z_centers = seeds_mlp(centers.view(batch_size, k*embed_dim))
-            else:
-                z_centers = global_z_draw.squeeze(dim=1)
-
 
             if test: 
                 if k>1:
@@ -383,14 +375,11 @@ for epoch in range(train_epochs):
 
             z_draws = []
             for i in range(n_student_draws):
-                if k > 1:
-                    z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
-                else:
-                    z_draw = output_s[i].squeeze(dim=1)
+                z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
                 if stop_gradient:
-                    loss_jepa += mse(z_draw, z_centers.detach())
+                    loss_jepa += mse(z_draw, z_center.detach())
                 else:
-                    loss_jepa += mse(z_draw, z_centers) 
+                    loss_jepa += mse(z_draw, z_center) 
                 
                 if not test3:
                     loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -443,8 +432,8 @@ for epoch in range(train_epochs):
             ist_transformer.eval()
             linear_head.eval()
             draws_attention.eval()
+            seeds_mlp.eval()                
             if k>1:
-                seeds_mlp.eval()                
                 heads_per_seed.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
@@ -489,27 +478,24 @@ for epoch in range(train_epochs):
                         mem_w = []
                         if cross_integration:
                             if k == 1:
-                                global_z_draw, _ = draws_attention(output_t.squeeze(dim=2)) 
+                                centers, w = draws_attention(output_t.squeeze(dim=2)) 
+                                mem_w += [w]
+                                z_center = seeds_mlp(centers)
                             else:
                                 center_seeds = []
                                 for seed_idx in range(k):
                                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                                     z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
-                                    mem_w.append(w)
+                                    mem_w += [w]
                                     center_seeds.append(z)
                                 centers = torch.stack(center_seeds, dim=1)
+                                z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
                         else:
                             centers = output_t.mean(dim=1)
-
+                            z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
 
                         loss_jepa = 0
                         loss_sigreg = 0
-
-                        if k > 1:
-                            z_centers = seeds_mlp(centers.view(batch_size, k*embed_dim))
-                        else:
-                            z_centers = global_z_draw.squeeze(dim=1)
-
 
                         if test: 
                             if k>1:
@@ -521,16 +507,12 @@ for epoch in range(train_epochs):
                             else:
                                 assert False # not consistent
 
-                        z_draws = []
                         for i in range(n_student_draws):
-                            if k > 1:
-                                z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
-                            else:
-                                z_draw = output_s[i].squeeze(dim=1)
+                            z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
                             if stop_gradient:
-                                loss_jepa += mse(z_draw, z_centers.detach())
+                                loss_jepa += mse(z_draw, z_center.detach())
                             else:
-                                loss_jepa += mse(z_draw, z_centers) 
+                                loss_jepa += mse(z_draw, z_center) 
                             
                             if not test3:
                                 loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -594,28 +576,19 @@ for epoch in range(train_epochs):
             ist_transformer.train()
             linear_head.train()
             draws_attention.train()
+            seeds_mlp.train()
             if k>1:
-                seeds_mlp.train()
                 heads_per_seed.train()
 
     if epoch % 10 == 9:
-        if k>1:
-            torch.save({
-                    "epoch": epoch,
-                    "history": history,
-                    "ist_transformer": ist_transformer.state_dict(),
-                    "draws_attention": draws_attention.state_dict(),
-                    "seeds_mlp": seeds_mlp.state_dict(),
-                    "linear_head": linear_head.state_dict()
-                },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
-        else:
-            torch.save({
-                    "epoch": epoch,
-                    "history": history,
-                    "ist_transformer": ist_transformer.state_dict(),
-                    "draws_attention": draws_attention.state_dict(),
-                    "linear_head": linear_head.state_dict()
-                },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))     
+        torch.save({
+                "epoch": epoch,
+                "history": history,
+                "ist_transformer": ist_transformer.state_dict(),
+                "draws_attention": draws_attention.state_dict(),
+                "seeds_mlp": seeds_mlp.state_dict(),
+                "linear_head": linear_head.state_dict()
+            },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
 
     if schedule:
         scheduler.step()
