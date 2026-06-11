@@ -78,7 +78,7 @@ strict_global_step = False
 wide_views = False
 cross_integration = True # cross_draws_integration
 
-grid = True
+grid = False
 curriculum = False
 
 suffix = ""
