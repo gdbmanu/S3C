@@ -56,20 +56,20 @@ k = 3       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
-n_uplet_student = 3
-n_uplet_teacher = 5
-n_student_draws = 5
-n_teacher_draws = 3
+n_uplet_student = 0
+n_uplet_teacher = 30
+n_student_draws = 0
+n_teacher_draws = 1
 
-orig = True
+orig = False
 
 train_epochs = 30
-lam = 0.05           # λ : trade-off JEPA / SIGReg
+lam = 0.           # λ : trade-off JEPA / SIGReg
 
 inv_temp = 1
 stop_gradient = False
 
-supervised = False
+supervised = True
 test = False # seed diversity
 center_test = False # center seed consistency
 vicreg = False # more seed diversity
@@ -109,7 +109,7 @@ if orig: suffix = suffix + "_ORIG"
 save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_v4"
 
 # Monter le dossier distant
-local=False
+local=True
 if local == False:
     if grid: 
         mount_point = os.path.expanduser("~/imagenet_grid")
@@ -170,18 +170,28 @@ draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 # LINEAR PROBE
 
 linear_head = nn.Sequential(
-                nn.LayerNorm(k * embed_dim),
-                nn.Linear(k * embed_dim, 1000),
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, 1000),
             )
 
-seeds_mlp = nn.Sequential(      # seeds integration
-            nn.LayerNorm(k * embed_dim),
-            nn.Linear(k * embed_dim, k * embed_dim),
-            nn.ReLU(),
-            nn.Linear(k * embed_dim, k * embed_dim),
-            nn.ReLU(),
-            nn.Linear(k * embed_dim, bottleneck_dim),
-        )   
+if not supervised :
+    seeds_mlp = nn.Sequential(
+        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+        nn.LayerNorm(embed_dim),                  # norm par seed ✓
+        nn.Flatten(1),                            # (B, k, d) → (B, k*d)
+        nn.Linear(k * embed_dim, k * embed_dim),
+        nn.ReLU(),
+        nn.Linear(k * embed_dim, k * embed_dim),
+        nn.ReLU(),
+        nn.Linear(k * embed_dim, bottleneck_dim),
+    )
+else:
+    seeds_mlp = nn.Sequential(
+        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+        nn.LayerNorm(embed_dim),                  # norm par seed ✓
+        nn.Flatten(1),                            # (B, k, d) → (B, k*d)
+        nn.Linear(k * embed_dim, bottleneck_dim),
+    )
 
 if k>1:                                     # cross-draws integration (seed diversity)
 
@@ -397,12 +407,13 @@ for epoch in range(train_epochs):
                     loss_seeds += criterion(output_t_seed, labels)
 
             if supervised:
-                #output_t_head = linear_head(z_centers)
-                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
-                loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + criterion(output_t_head, labels)
+                output_t_head = linear_head(z_center)
+                #output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
+                #loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + criterion(output_t_head, labels)
+                loss_label = loss = criterion(output_t_head, labels)
             else:
-                #output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                #output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg 
 
@@ -533,8 +544,8 @@ for epoch in range(train_epochs):
                                 preds = output_t_seed.argmax(dim=1)
                                 seeds_correct[j] += (preds == labels).sum().item()
 
-                        #output_t_head = linear_head(z_centers.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                        output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                        #output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
 
                         loss_label = criterion(output_t_head, labels)
 
