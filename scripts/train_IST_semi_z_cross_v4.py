@@ -351,7 +351,8 @@ for epoch in range(train_epochs):
 
         #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+            if n_student_draws > 0:
+                output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
             output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
             #
             if cross_integration:
@@ -373,7 +374,7 @@ for epoch in range(train_epochs):
             loss_jepa = 0
             loss_sigreg = 0
 
-            if test: 
+            if test and n_student_draws > 0:
                 if k>1:
                     for j in range(k): # seeds loop
                         for i in range(n_student_draws):           
@@ -383,18 +384,19 @@ for epoch in range(train_epochs):
                 else:
                     assert False # not consistent
 
-            z_draws = []
-            for i in range(n_student_draws):
-                z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
-                if stop_gradient:
-                    loss_jepa += mse(z_draw, z_center.detach())
-                else:
-                    loss_jepa += mse(z_draw, z_center) 
-                
-                if not test3:
-                    loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
-                    if not strict_global_step:
-                        global_step += 1
+            if n_student_draws > 0:
+                z_draws = []
+                for i in range(n_student_draws):
+                    z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
+                    if stop_gradient:
+                        loss_jepa += mse(z_draw, z_center.detach())
+                    else:
+                        loss_jepa += mse(z_draw, z_center) 
+                    
+                    if not test3:
+                        loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
+                        if not strict_global_step:
+                            global_step += 1
 
             if strict_global_step:
                 global_step += 1
@@ -483,7 +485,8 @@ for epoch in range(train_epochs):
 
                     #with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
+                        if n_student_draws > 0:
+                            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
                         output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
                         #
                         mem_w = []
@@ -505,10 +508,10 @@ for epoch in range(train_epochs):
                             centers = output_t.mean(dim=1)
                             z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
 
-                        loss_jepa = 0
-                        loss_sigreg = 0
+                        loss_jepa = torch.tensor(0.).to(device)
+                        loss_sigreg = torch.tensor(0.).to(device)
 
-                        if test: 
+                        if test and n_student_draws > 0:
                             if k>1:
                                 for j in range(k): # seeds loop
                                     for i in range(n_student_draws):           
@@ -518,17 +521,18 @@ for epoch in range(train_epochs):
                             else:
                                 assert False # not consistent
 
-                        for i in range(n_student_draws):
-                            z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
-                            if stop_gradient:
-                                loss_jepa += mse(z_draw, z_center.detach())
-                            else:
-                                loss_jepa += mse(z_draw, z_center) 
-                            
-                            if not test3:
-                                loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
-                                if not strict_global_step:
-                                    global_step += 1
+                        if n_student_draws > 0:
+                            for i in range(n_student_draws):
+                                z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
+                                if stop_gradient:
+                                    loss_jepa += mse(z_draw, z_center.detach())
+                                else:
+                                    loss_jepa += mse(z_draw, z_center) 
+                                
+                                if not test3:
+                                    loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
+                                    if not strict_global_step:
+                                        global_step += 1
 
                         if strict_global_step:
                             global_step += 1
