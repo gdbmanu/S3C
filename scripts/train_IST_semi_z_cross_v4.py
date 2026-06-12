@@ -49,8 +49,8 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 2
-self_att = False
+n_sab = 4
+self_att = True
 
 k = 3       # n_seeds
 n_heads = 12
@@ -78,7 +78,7 @@ strict_global_step = False
 wide_views = False
 cross_integration = True # cross_draws_integration
 
-grid = False
+grid = True
 curriculum = False
 
 suffix = ""
