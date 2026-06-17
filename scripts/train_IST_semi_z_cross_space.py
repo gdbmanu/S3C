@@ -25,7 +25,7 @@ from torchvision import datasets
 from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor
+from s3c.models.heads import PosPredictor, ABMILPosPredictor
 
 import timm
 
@@ -63,6 +63,14 @@ n_student_draws = 4
 n_teacher_draws = 3
 
 orig = False
+grid = False
+curriculum = False
+
+supervised = False
+if supervised:
+    pure = False
+    alpha = 1e-6 #3e-7
+    beta = 1e-4
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
@@ -71,23 +79,28 @@ mu = 1               # spatial probe weight
 inv_temp = 1
 stop_gradient = False
 
-supervised = False
-test = False # seed diversity
+test = True # seed diversity
 center_test = False # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
 cross_integration = True # cross_draws_integration
 
-grid = False
-curriculum = False
+abmil_pos = True
 
 suffix = ""
-if supervised : suffix = suffix + "_SUP"
+if supervised : 
+    if pure: suffix = suffix + "_PURESUP"
+    else: suffix = suffix + "_SUP"
+    suffix = suffix + f"_a{alpha}"
+    if beta != 1e-4 : suffix = suffix + f"_b{beta}"
+else:
+    pure = False
 
 if self_att : suffix = suffix + '_SELF'
 
-if test : suffix = suffix + "_TEST"
+if test : 
+    if not pure: suffix = suffix + "_TEST"
 if center_test : suffix = suffix + "_CENTER"
 
 if vicreg: suffix = suffix + "_VICREG"
@@ -103,6 +116,7 @@ if grid :
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
+if abmil_pos : suffix = suffix + "_APOS"
 
 if orig: suffix = suffix + "_ORIG"
 
@@ -167,7 +181,10 @@ ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_di
 
 draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 
-pos_predictor = PosPredictor(embed_dim, k)
+if abmil_pos:
+    pos_predictor = ABMILPosPredictor(embed_dim, k)
+else:
+    pos_predictor = PosPredictor(embed_dim, k)
 
 # LINEAR PROBE
 linear_head = nn.Sequential(
@@ -271,19 +288,29 @@ if k>1:
 os.makedirs(save_dir, exist_ok=True)
 
 if supervised:
-    linear_optimizer = torch.optim.AdamW(
-        [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
-        {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': pos_predictor.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
-        {'params': linear_head.parameters(), 'lr': 1e-4}], #3e-6}], #1e-4}],
-        weight_decay=1e-3, #0.04,  
-    )
+    if train_epochs == 100:
+        linear_optimizer = torch.optim.AdamW(
+            [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
+            {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
+            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+            {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
+            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            weight_decay=3e-4, #0.04,  
+        )
+    else:
+        linear_optimizer = torch.optim.AdamW(
+            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+            {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
+            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+            {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
+            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            weight_decay=1e-3, #0.04,  
+        )
 else:
     optimizer = torch.optim.AdamW([
         {'params': ist_transformer.parameters(), 'lr': 3e-5},
         {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': pos_predictor.parameters(),       'lr': 1e-4},
+        {'params': pos_predictor.parameters(),       'lr': 3e-4}, # 1e-4
         {'params': seeds_mlp.parameters(),       'lr': 3e-4},
     ], weight_decay=1e-3)
 
@@ -429,8 +456,10 @@ for epoch in range(train_epochs):
             if supervised:
                 #output_t_head = linear_head(z_center)
                 output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
-                #loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
-                loss_label = loss = criterion(output_t_head, labels)
+                if pure:
+                    loss_label = loss = criterion(output_t_head, labels)
+                else:
+                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
@@ -462,6 +491,7 @@ for epoch in range(train_epochs):
 
             ist_transformer.eval()
             linear_head.eval()
+            pos_predictor.eval()
             draws_attention.eval()
             seeds_mlp.eval()                
             if k>1:
@@ -625,6 +655,7 @@ for epoch in range(train_epochs):
 
             ist_transformer.train()
             linear_head.train()
+            pos_predictor.train()
             draws_attention.train()
             seeds_mlp.train()
             if k>1:
@@ -637,7 +668,8 @@ for epoch in range(train_epochs):
                 "ist_transformer": ist_transformer.state_dict(),
                 "draws_attention": draws_attention.state_dict(),
                 "seeds_mlp": seeds_mlp.state_dict(),
-                "linear_head": linear_head.state_dict()
+                "linear_head": linear_head.state_dict(),
+                "pos_predictor": pos_predictor.state_dict()
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
 
     if schedule:

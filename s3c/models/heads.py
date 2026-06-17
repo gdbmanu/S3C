@@ -71,6 +71,72 @@ class PosPredictor(nn.Module):
 
         h_flat = torch.cat(hs, dim=-1)            # (B, k*hidden_dim)
         return self.head(h_flat)                  # (B, out_dim)
+
+
+class ABMILPosPredictor(nn.Module):
+    """
+    Prédit la position (x, y) d'une vue z à partir des k seeds
+    et de l'embedding DINO de cette vue.
+
+    Poids et LayerNorm DISTINCTS par seed.
+
+    s : (B, k, emb_dim)  — seeds
+    z : (B, emb_dim)     — embedding DINO de la vue à localiser
+
+    Logique ABMIL dans la couche intermédiaire
+    """
+    def __init__(self, emb_dim=768, k=1, hidden_dim=512, out_dim=2):
+        super().__init__()
+        self.k = k
+
+        # LayerNorm distinct par seed
+        self.norm_s = nn.ModuleList([
+            nn.LayerNorm(emb_dim) for _ in range(k)
+        ])
+        # LayerNorm de z 
+        self.norm_z = nn.LayerNorm(emb_dim) 
+
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )
+
+        # Combinaison (s_i, z) → h_i — poids distincts par seed
+        self.combine = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(2 * emb_dim, hidden_dim),
+                nn.ReLU(),
+            )
+            for _ in range(k)
+        ])
+
+        # MLP final sur la concaténation h1...hk
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, s, z):
+        # s : (B, k, emb_dim)
+        # z : (B, emb_dim)
+
+        if s.dim() == 2:
+            s = s.unsqueeze(1)   # (B, emb_dim) → (B, 1, emb_dim)
+
+        hs = []
+        z = self.norm_z(z)  
+        for i in range(self.k):
+            s_i = self.norm_s[i](s[:, i, :])      # (B, emb_dim)
+            sz_i = torch.cat([s_i, z], dim=-1)    # (B, 2*emb_dim)
+            hs.append(self.combine[i](sz_i))      # (B, hidden_dim)
+        hs = torch.stack(hs, dim=1)               # (B, k, hidden_dim)
+        w = self.attn(hs)                         # (B, k, 1)
+        w = torch.softmax(w, dim=1)
+        h = (w * hs).sum(dim=1)              # (B, hidden_dim)
+        return self.head(h)                  # (B, out_dim)
+    
     
 class DualPredictor(nn.Module):
     def __init__(self, emb_dim=768, hidden_dim=256):

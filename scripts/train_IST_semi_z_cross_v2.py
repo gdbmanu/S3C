@@ -65,7 +65,7 @@ inv_temp = 1
 stop_gradient = False
 
 supervised = False
-test = True # seed diversity
+test = False # seed diversity
 center_test = False # center seed consistency
 vicreg = True # more seed diversity
 test3 = False # no sample diversity
