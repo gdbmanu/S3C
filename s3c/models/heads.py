@@ -96,27 +96,43 @@ class ABMILPosPredictor(nn.Module):
         # LayerNorm de z 
         self.norm_z = nn.LayerNorm(emb_dim) 
 
-        self.attn = nn.Sequential(
+        '''self.attn = nn.Sequential(
             nn.Linear(hidden_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )'''
+
+        self.attn = nn.Sequential(
+            nn.Linear(2 * emb_dim, 256),   # ← 2*emb_dim au lieu de emb_dim
             nn.Tanh(),
             nn.Linear(256, 1),
         )
 
         # Combinaison (s_i, z) → h_i — poids distincts par seed
-        self.combine = nn.ModuleList([
-            nn.Sequential(
+        self.combine = nn.Sequential(
+                nn.Linear(2 * emb_dim, 2 * emb_dim),
+                nn.ReLU(),
                 nn.Linear(2 * emb_dim, hidden_dim),
                 nn.ReLU(),
             )
+
+        self.seed_transform = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(emb_dim, hidden_dim),
+                nn.ReLU(),
+            )
             for _ in range(k)
-        ])
+        ])'''
 
         # MLP final sur la concaténation h1...hk
-        self.head = nn.Sequential(
+        '''self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, out_dim),
-        )
+        )'''
+
+        self.head = nn.Linear(hidden_dim, out_dim)
+        
 
     def forward(self, s, z):
         # s : (B, k, emb_dim)
@@ -125,9 +141,27 @@ class ABMILPosPredictor(nn.Module):
         if s.dim() == 2:
             s = s.unsqueeze(1)   # (B, emb_dim) → (B, 1, emb_dim)
 
-        hs = []
-        z = self.norm_z(z)  
-        for i in range(self.k):
+        z_norm = self.norm_z(z)  
+
+        s_norm = torch.stack([
+                                self.norm_s[i](s[:, i, :]) for i in range(self.k)
+                            ], dim=1)   # (B, k, emb_dim)
+        
+        # Concaténer z à chaque seed pour le calcul des scores
+        z_exp = z_norm.unsqueeze(1).expand(-1, self.k, -1) # (B, k, emb_dim)
+        sz = torch.cat([s_norm, z_exp], dim=-1)            # (B, k, 2*emb_dim)
+
+        # ABMIL conditionné sur z
+        w = self.attn(sz)                                  # (B, k, 1)
+        w = torch.softmax(w, dim=1)
+        h = (w * s_norm).sum(dim=1)
+
+        hz = torch.cat([h, z_norm], dim=-1)
+        hz = self.combine(hz)
+        return self.head(hz) 
+
+
+        '''for i in range(self.k):
             s_i = self.norm_s[i](s[:, i, :])      # (B, emb_dim)
             sz_i = torch.cat([s_i, z], dim=-1)    # (B, 2*emb_dim)
             hs.append(self.combine[i](sz_i))      # (B, hidden_dim)
@@ -135,7 +169,7 @@ class ABMILPosPredictor(nn.Module):
         w = self.attn(hs)                         # (B, k, 1)
         w = torch.softmax(w, dim=1)
         h = (w * hs).sum(dim=1)              # (B, hidden_dim)
-        return self.head(h)                  # (B, out_dim)
+        return self.head(h)                  # (B, out_dim)'''
     
     
 class DualPredictor(nn.Module):

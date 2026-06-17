@@ -66,11 +66,13 @@ orig = False
 grid = False
 curriculum = False
 
-supervised = False
+supervised = True
 if supervised:
     pure = False
     alpha = 1e-6 #3e-7
     beta = 1e-4
+else:
+    pure = False
 
 train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
@@ -116,7 +118,7 @@ if grid :
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
-if abmil_pos : suffix = suffix + "_APOS"
+if abmil_pos : suffix = suffix + "_APOS2"
 
 if orig: suffix = suffix + "_ORIG"
 
