@@ -25,7 +25,7 @@ from torchvision import datasets
 from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor
+from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor, TransformerLabelHead
 
 import timm
 
@@ -73,7 +73,7 @@ mu = 1               # spatial probe weight
 supervised = True
 if supervised:
     pure = False
-    alpha = 1e-6 #1e-6 #1e-5 #3e-7
+    alpha = 3e-6 #1e-6 #1e-5 #3e-7
     beta = 3e-5
 else:
     pure = False
@@ -89,7 +89,9 @@ strict_global_step = False
 cross_integration = True # cross_draws_integration
 
 abmil_pos = True
-abmil_label = True
+
+abmil_label = False
+trans_label = True
 
 suffix = ""
 if supervised : 
@@ -121,6 +123,7 @@ if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
+if trans_label : suffix = suffix + "_TRANSLAB"
 
 
 if orig: suffix = suffix + "_ORIG"
@@ -195,6 +198,8 @@ else:
 
 if abmil_label:
     linear_head = ABMILLabelPredictor(emb_dim=embed_dim, k=k)
+elif trans_label:
+    linear_head = TransformerLabelHead(emb_dim=embed_dim)
 else:
     linear_head = nn.Sequential(
                     nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
@@ -301,34 +306,34 @@ if supervised:
             {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
-            #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            {'params': linear_head.attn.parameters(), 'lr': alpha * 3},
+            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            weight_decay=3e-4, #0.04,  
+        )
+        '''{'params': linear_head.attn.parameters(), 'lr': alpha * 3},
             {'params': linear_head.head.parameters(), 'lr': alpha},
             {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
             # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
             {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
             {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
             {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
-            {'params': [linear_head.cls_token],                   'lr': alpha*10}],
-            weight_decay=3e-4, #0.04,  
-        )
+            {'params': [linear_head.cls_token],                   'lr': alpha*10}],'''
     else:
         linear_optimizer = torch.optim.AdamW(
             [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
             {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
-            #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            {'params': linear_head.attn.parameters(), 'lr': alpha * 3},
+            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            weight_decay=1e-3, #0.04,  
+        )
+        '''{'params': linear_head.attn.parameters(), 'lr': alpha * 3},
             {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
             {'params': linear_head.head.parameters(), 'lr': alpha},
             # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
             {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
             {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
             {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
-            {'params': [linear_head.cls_token],                   'lr': alpha*10}],
-            weight_decay=1e-3, #0.04,  
-        )
+            {'params': [linear_head.cls_token],                   'lr': alpha*10}],'''
 else:
     optimizer = torch.optim.AdamW([
         {'params': ist_transformer.parameters(), 'lr': 3e-5},
