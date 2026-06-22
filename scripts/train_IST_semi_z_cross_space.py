@@ -25,7 +25,7 @@ from torchvision import datasets
 from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor, ABMILPosPredictor
+from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor
 
 import timm
 
@@ -66,17 +66,17 @@ orig = False
 grid = False
 curriculum = False
 
+train_epochs = 100
+lam = 0.05           # λ : trade-off JEPA / SIGReg
+mu = 1               # spatial probe weight
+
 supervised = True
 if supervised:
     pure = False
-    alpha = 1e-6 #3e-7
-    beta = 1e-4
+    alpha = 1e-6 #1e-6 #1e-5 #3e-7
+    beta = 3e-5
 else:
     pure = False
-
-train_epochs = 30
-lam = 0.05           # λ : trade-off JEPA / SIGReg
-mu = 1               # spatial probe weight
 
 inv_temp = 1
 stop_gradient = False
@@ -89,6 +89,7 @@ strict_global_step = False
 cross_integration = True # cross_draws_integration
 
 abmil_pos = True
+abmil_label = True
 
 suffix = ""
 if supervised : 
@@ -119,6 +120,8 @@ if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 if abmil_pos : suffix = suffix + "_APOS2"
+if abmil_label : suffix = suffix + "_ALAB2"
+
 
 if orig: suffix = suffix + "_ORIG"
 
@@ -189,12 +192,16 @@ else:
     pos_predictor = PosPredictor(embed_dim, k)
 
 # LINEAR PROBE
-linear_head = nn.Sequential(
-                nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
-                nn.LayerNorm(embed_dim),                  # norm par seed ✓
-                nn.Flatten(1),    
-                nn.Linear(k * embed_dim, 1000),
-            )
+
+if abmil_label:
+    linear_head = ABMILLabelPredictor(emb_dim=embed_dim, k=k)
+else:
+    linear_head = nn.Sequential(
+                    nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+                    nn.LayerNorm(embed_dim),                  # norm par seed ✓
+                    nn.Flatten(1),    
+                    nn.Linear(k * embed_dim, 1000),
+                )
 
 seeds_mlp = nn.Sequential(
     nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
@@ -264,8 +271,6 @@ if curriculum:
     print("⚠️ Paramètres inattendus :", unexpected)
 
 
-
-
 ist_transformer.to(device)
 ist_transformer.train()
 
@@ -296,7 +301,15 @@ if supervised:
             {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            {'params': linear_head.attn.parameters(), 'lr': alpha * 3},
+            {'params': linear_head.head.parameters(), 'lr': alpha},
+            {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
+            # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
+            {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
+            {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
+            {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
+            {'params': [linear_head.cls_token],                   'lr': alpha*10}],
             weight_decay=3e-4, #0.04,  
         )
     else:
@@ -305,7 +318,15 @@ if supervised:
             {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+            {'params': linear_head.attn.parameters(), 'lr': alpha * 3},
+            {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
+            {'params': linear_head.head.parameters(), 'lr': alpha},
+            # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
+            {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
+            {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
+            {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
+            {'params': [linear_head.cls_token],                   'lr': alpha*10}],
             weight_decay=1e-3, #0.04,  
         )
 else:
@@ -457,7 +478,10 @@ for epoch in range(train_epochs):
 
             if supervised:
                 #output_t_head = linear_head(z_center)
-                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
+                if abmil_label:
+                    output_t_head, _ = linear_head(centers, labels)
+                else:
+                    output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                 if pure:
                     loss_label = loss = criterion(output_t_head, labels)
                 else:
@@ -610,7 +634,12 @@ for epoch in range(train_epochs):
                                 seeds_correct[j] += (preds == labels).sum().item()
 
                         #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                        output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+
+                        if abmil_label:
+                            output_t_head, _ = linear_head(centers, labels)
+                        else:
+                            output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
+                        #output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
 
                         loss_label = criterion(output_t_head, labels)
 

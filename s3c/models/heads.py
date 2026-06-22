@@ -103,16 +103,16 @@ class ABMILPosPredictor(nn.Module):
         )'''
 
         self.attn = nn.Sequential(
-            nn.Linear(2 * emb_dim, 256),   # ← 2*emb_dim au lieu de emb_dim
+            nn.Linear(2 * hidden_dim, 256),   # ← 2*emb_dim au lieu de emb_dim
             nn.Tanh(),
             nn.Linear(256, 1),
         )
 
         # Combinaison (s_i, z) → h_i — poids distincts par seed
         self.combine = nn.Sequential(
-                nn.Linear(2 * emb_dim, 2 * emb_dim),
+                nn.Linear(2 * hidden_dim, 2 * hidden_dim),
                 nn.ReLU(),
-                nn.Linear(2 * emb_dim, hidden_dim),
+                nn.Linear(2 * hidden_dim, hidden_dim),
                 nn.ReLU(),
             )
 
@@ -120,9 +120,16 @@ class ABMILPosPredictor(nn.Module):
             nn.Sequential(
                 nn.Linear(emb_dim, hidden_dim),
                 nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
             )
             for _ in range(k)
-        ])'''
+        ])
+
+        self.z_transform = nn.Sequential(
+                nn.Linear(emb_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
 
         # MLP final sur la concaténation h1...hk
         '''self.head = nn.Sequential(
@@ -141,10 +148,10 @@ class ABMILPosPredictor(nn.Module):
         if s.dim() == 2:
             s = s.unsqueeze(1)   # (B, emb_dim) → (B, 1, emb_dim)
 
-        z_norm = self.norm_z(z)  
+        z_norm = self.z_transform(self.norm_z(z) )
 
         s_norm = torch.stack([
-                                self.norm_s[i](s[:, i, :]) for i in range(self.k)
+                                self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
                             ], dim=1)   # (B, k, emb_dim)
         
         # Concaténer z à chaque seed pour le calcul des scores
@@ -170,6 +177,197 @@ class ABMILPosPredictor(nn.Module):
         w = torch.softmax(w, dim=1)
         h = (w * hs).sum(dim=1)              # (B, hidden_dim)
         return self.head(h)                  # (B, out_dim)'''
+
+
+class ABMILLabelPredictor(nn.Module):
+    def __init__(self, emb_dim=768, k=1, hidden_dim=768,
+                 n_classes=1000, label_emb_dim=32):
+        super().__init__()
+        self.k = k
+
+        # Embedding du label
+        self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+        self.norm_label = nn.LayerNorm(label_emb_dim)
+        self.cls_token = nn.Parameter(torch.randn(1, label_emb_dim))
+
+        # LayerNorm et projection par seed
+        self.norm_s = nn.ModuleList([nn.LayerNorm(emb_dim) for _ in range(k)])
+        self.seed_transform = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(emb_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            for _ in range(k)
+        ])
+
+        """self.label_transform = nn.Sequential(
+                nn.Linear(label_emb_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )"""
+
+        # ABMIL : seed (hidden_dim) + label (label_emb_dim)
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_dim + label_emb_dim, 256),
+            #nn.Linear(hidden_dim * 2, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )
+
+        self.head = nn.Linear(hidden_dim, n_classes)
+
+    def forward(self, s, labels=None):
+        B = s.shape[0]
+        if s.dim() == 2:
+            s = s.unsqueeze(1)
+
+        # ── Label encoding ────────────────────────────────────────────
+        if labels is not None and self.training:
+            mask = torch.rand(B, device=s.device) < 0.2
+            l_emb = self.norm_label(self.label_embedding(labels))
+            cls_exp = self.norm_label(self.cls_token.expand(B, -1))  # ← normalisé
+            l_emb = torch.where(mask.unsqueeze(1), cls_exp, l_emb)
+        elif labels is not None:
+            l_emb = self.norm_label(self.label_embedding(labels))
+        else:
+            l_emb = self.norm_label(self.cls_token.expand(B, -1))    # ← normalisé
+        # ── Projection des seeds ──────────────────────────────────────
+        s_norm = torch.stack([
+            #self.seed_transform[i](self.norm_s[i](s[:, i, :]))
+            self.norm_s[i](s[:, i, :])
+            for i in range(self.k)
+        ], dim=1)                                      # (B, k, hidden_dim)
+
+        # ── ABMIL conditionné sur le label ────────────────────────────
+        l_exp = l_emb.unsqueeze(1).expand(-1, self.k, -1)  # (B, k, label_emb_dim)
+        sl = torch.cat([s_norm.detach(), l_exp], dim=-1)        # (B, k, hidden_dim+label_emb_dim)
+
+        w = self.attn(sl)                              # (B, k, 1)
+        w = torch.softmax(w, dim=1)
+
+        s_trans = torch.stack([
+            self.seed_transform[i](s_norm[:, i, :])
+            for i in range(self.k)
+        ], dim=1)  
+
+        h = (w * s_norm).sum(dim=1)                    # (B, hidden_dim)
+
+        # ── Combinaison + prédiction ──────────────────────────────────
+
+        return self.head(h), w                        # (B, n_classes), (B, k, 1)
+
+# class ABMILLabelPredictor(nn.Module):
+#     """
+#     Prédit le label ImageNet depuis les k seeds.
+#     Le label (encodé) est injecté dans self.attn pour conditionner
+#     la sélection des seeds — mais à l'inférence, le label n'est pas
+#     disponible, donc on peut aussi utiliser un token CLS appris.
+    
+#     s : (B, k, emb_dim)
+#     l : (B,) indices de labels entiers — optionnel à l'inférence
+#     """
+#     def __init__(self, emb_dim=768, k=1, hidden_dim=768,
+#                  n_classes=1000, label_emb_dim=128, label_hidden_dim=768):
+#         super().__init__()
+#         self.k = k
+#         self.label_emb_dim = label_emb_dim
+
+#         # Embedding du label : 1000 classes → label_emb_dim
+#         self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+#         self.norm_label = nn.LayerNorm(label_emb_dim)
+
+#         # Token CLS appris — utilisé à l'inférence quand le label est inconnu
+#         self.cls_token = nn.Parameter(torch.randn(1, label_emb_dim))
+
+#         # LayerNorm distinct par seed
+#         self.norm_s = nn.ModuleList([
+#             nn.LayerNorm(emb_dim) for _ in range(k)
+#         ])
+
+#         # Projection des seeds vers hidden_dim
+#         self.seed_transform = nn.ModuleList([
+#             nn.Sequential(
+#                 nn.Linear(emb_dim, hidden_dim),
+#                 nn.ReLU(),
+#                 nn.Linear(hidden_dim, hidden_dim),
+#             )
+#             for _ in range(k)
+#         ])
+
+#         # Projection du label vers hidden_dim
+#         self.label_transform = nn.Sequential(
+#             nn.Linear(label_emb_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, hidden_dim),
+#         )
+
+#         # ABMIL conditionné sur le label
+#         self.attn = nn.Sequential(
+#             nn.Linear(2 * hidden_dim, 256),
+#             nn.Tanh(),
+#             nn.Linear(256, 1),
+#         )
+
+#         # Combinaison seed agrégé + label
+#         self.combine = nn.Sequential(
+#             nn.Linear(2 * hidden_dim, 2 * hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(2 * hidden_dim, label_hidden_dim),
+#             nn.ReLU(),
+#         )
+
+#         self.head = nn.Linear(label_hidden_dim, n_classes)
+
+#     def forward(self, s, labels=None):
+#         # s      : (B, k, emb_dim)
+#         # labels : (B,) entiers — None à l'inférence
+#         B = s.shape[0]
+
+#         if s.dim() == 2:
+#             s = s.unsqueeze(1)
+
+#         # ── Encoding du label ─────────────────────────────────────────
+#         if labels is not None:
+#             l_emb = self.label_embedding(labels)       # (B, label_emb_dim)
+#             l_emb = self.norm_label(l_emb)
+#         else:
+#             # À l'inférence : token CLS appris, partagé sur le batch
+#             l_emb = self.cls_token.expand(B, -1)       # (B, label_emb_dim)
+
+#         if labels is not None and self.training:
+#             # Masquer aléatoirement le label pendant l'entraînement
+#             mask = torch.rand(B, device=s.device) < 0.2   # 20% du temps
+#             l_emb = self.label_embedding(labels)
+#             cls_expanded = self.cls_token.expand(B, -1)
+#             # Remplacer par cls_token là où le label est masqué
+#             l_emb = torch.where(mask.unsqueeze(1), cls_expanded, l_emb)
+#         elif labels is None:
+#             l_emb = self.cls_token.expand(B, -1)
+
+#         l_emb = self.norm_label(l_emb)
+
+#         l_transformed = self.label_transform(l_emb)    # (B, hidden_dim)
+
+#         # ── Projection des seeds ──────────────────────────────────────
+#         s_norm = torch.stack([
+#             self.seed_transform[i](self.norm_s[i](s[:, i, :]))
+#             for i in range(self.k)
+#         ], dim=1)                                       # (B, k, hidden_dim)
+
+#         # ── ABMIL conditionné sur le label ────────────────────────────
+#         l_exp = l_transformed.unsqueeze(1).expand(-1, self.k, -1)  # (B, k, hidden_dim)
+#         sl = torch.cat([s_norm, l_exp], dim=-1)        # (B, k, 2*hidden_dim)
+
+#         w = self.attn(sl)                              # (B, k, 1)
+#         w = torch.softmax(w, dim=1)
+#         h = (w * s_norm).sum(dim=1)                    # (B, hidden_dim)
+
+#         # ── Combinaison + prédiction ──────────────────────────────────
+#         hl = torch.cat([h, l_transformed], dim=-1)     # (B, 2*hidden_dim)
+#         hl = self.combine(hl)                          # (B, hidden_dim)
+
+#         return self.head(hl), w                        # (B, n_classes), (B, k, 1)
     
     
 class DualPredictor(nn.Module):
