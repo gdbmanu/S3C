@@ -256,6 +256,89 @@ class ABMILLabelPredictor(nn.Module):
         # ── Combinaison + prédiction ──────────────────────────────────
 
         return self.head(h), w                        # (B, n_classes), (B, k, 1)
+    
+class TransformerLabelHead(nn.Module):
+    """
+    Cross-attention : label (Q) × seeds (K, V)
+    Le token label queye les seeds pour extraire
+    l'information pertinente pour la classification.
+    
+    s      : (B, k, emb_dim)
+    labels : (B,) — entiers
+    """
+    def __init__(self, emb_dim=768, n_heads=8, k=4,
+                 n_classes=1000, label_emb_dim=32, dropout=0.1):
+        super().__init__()
+        self.k = k
+
+        # Token label — embedding appris
+        self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        self.norm_label = nn.LayerNorm(emb_dim)
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+
+        # Projection label_emb_dim → emb_dim si nécessaire
+        # Ici on travaille directement en emb_dim pour la cohérence
+        # avec les seeds
+
+        # Norms Pre-LN
+        self.norm_q  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.norm_kv = nn.LayerNorm(emb_dim)   # sur les seeds
+
+        # Cross-attention : label (Q) × seeds (K, V)
+        self.cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        # FFN sur le token label après cross-attention
+        self.norm_ffn = nn.LayerNorm(emb_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        # Tête de classification
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.head = nn.Linear(emb_dim, n_classes)
+
+    def forward(self, s, labels=None):
+        """
+        s      : (B, k, emb_dim)
+        labels : (B,) entiers — None à l'inférence
+        """
+        B = s.shape[0]
+
+        # ── Token label ───────────────────────────────────────────────
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=s.device) < 0.2
+            l_emb  = self.norm_label(self.label_embedding(labels))  # (B, emb_dim)
+            cls    = self.norm_label(self.cls_token.expand(B, -1, -1).squeeze(1))
+            l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
+        elif labels is not None:
+            l_emb  = self.norm_label(self.label_embedding(labels))  # (B, emb_dim)
+        else:
+            l_emb  = self.norm_label(self.cls_token.expand(B, -1, -1).squeeze(1))
+
+        q = l_emb.unsqueeze(1)             # (B, 1, emb_dim) — token unique
+
+        # ── Pre-LN ───────────────────────────────────────────────────
+        q_norm  = self.norm_q(q)           # (B, 1, emb_dim)
+        kv_norm = self.norm_kv(s)          # (B, k, emb_dim)
+
+        # ── Cross-attention : label queye les seeds ───────────────────
+        # Q = label token, K = V = seeds
+        # Pas de self-attention → pas de leak possible
+        h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)
+        q = q + h                          # résiduelle sur le token label
+
+        # ── FFN sur le token label ────────────────────────────────────
+        q = q + self.ffn(self.norm_ffn(q))
+
+        # ── Classification ────────────────────────────────────────────
+        z = self.norm_out(q.squeeze(1))    # (B, emb_dim)
+        return self.head(z), attn_weights  # (B, n_classes), (B, 1, k)
 
 # class ABMILLabelPredictor(nn.Module):
 #     """
