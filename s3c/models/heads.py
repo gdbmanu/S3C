@@ -178,6 +178,60 @@ class ABMILPosPredictor(nn.Module):
         h = (w * hs).sum(dim=1)              # (B, hidden_dim)
         return self.head(h)                  # (B, out_dim)'''
 
+class TransformerPosPredictor(nn.Module):
+    """
+    Prédit la position (x, y) d'une vue z à partir des k seeds.
+    Q = z (vue fovéale), K = V = seeds.
+    Pas de résiduelle sur Q pour éviter que z influence directement la sortie.
+    
+    s : (B, k, emb_dim)
+    z : (B, emb_dim)
+    """
+
+    def __init__(self, emb_dim=768, n_heads=8,
+                hidden_dim=512, out_dim=2, dropout=0.1):
+        super().__init__()
+
+        self.z_transform = nn.Linear(emb_dim, hidden_dim)
+        self.seed_transform = nn.Linear(emb_dim, hidden_dim) 
+
+        self.norm_q  = nn.LayerNorm(hidden_dim)
+        self.norm_kv = nn.LayerNorm(hidden_dim)
+
+        self.cross_attn = nn.MultiheadAttention(
+            hidden_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.norm_ffn = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * hidden_dim, hidden_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.norm_out = nn.LayerNorm(hidden_dim)
+        self.head = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, s, z):
+        if s.dim() == 2:
+            s = s.unsqueeze(1)
+
+        z = self.z_transform(z)               # (B, hidden_dim)
+
+        s = self.seed_transform(s)            # (B, k, hidden_dim)
+
+        q  = self.norm_q(z).unsqueeze(1)      # (B, 1, hidden_dim)
+        kv = self.norm_kv(s)                  # (B, k, hidden_dim)
+
+        h, attn_weights = self.cross_attn(q, kv, kv)       # (B, 1, hidden_dim)
+        q = q + h
+        q = q + self.ffn(self.norm_ffn(q))              # résiduelle FFN sur q ✓
+        h = q.squeeze(1)                                # (B, hidden_dim)
+
+        return self.head(self.norm_out(h)), attn_weights   # (B, out_dim), (B, 1, k)
+
 
 class ABMILLabelPredictor(nn.Module):
     def __init__(self, emb_dim=768, k=1, hidden_dim=768,
@@ -266,14 +320,13 @@ class TransformerLabelHead(nn.Module):
     s      : (B, k, emb_dim)
     labels : (B,) — entiers
     """
-    def __init__(self, emb_dim=768, n_heads=8, k=4,
+    def __init__(self, emb_dim=768, n_heads=8, 
                  n_classes=1000, label_emb_dim=32, dropout=0.1):
         super().__init__()
-        self.k = k
 
         # Token label — embedding appris
         self.label_embedding = nn.Embedding(n_classes, emb_dim)
-        self.norm_label = nn.LayerNorm(emb_dim)
+        #self.norm_label = nn.LayerNorm(emb_dim)
         self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
 
         # Projection label_emb_dim → emb_dim si nécessaire
@@ -313,13 +366,13 @@ class TransformerLabelHead(nn.Module):
         # ── Token label ───────────────────────────────────────────────
         if labels is not None and self.training:
             mask   = torch.rand(B, device=s.device) < 0.2
-            l_emb  = self.norm_label(self.label_embedding(labels))  # (B, emb_dim)
-            cls    = self.norm_label(self.cls_token.expand(B, -1, -1).squeeze(1))
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
             l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
         elif labels is not None:
-            l_emb  = self.norm_label(self.label_embedding(labels))  # (B, emb_dim)
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
         else:
-            l_emb  = self.norm_label(self.cls_token.expand(B, -1, -1).squeeze(1))
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
 
         q = l_emb.unsqueeze(1)             # (B, 1, emb_dim) — token unique
 
@@ -331,14 +384,17 @@ class TransformerLabelHead(nn.Module):
         # Q = label token, K = V = seeds
         # Pas de self-attention → pas de leak possible
         h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)
-        q = q + h                          # résiduelle sur le token label
+
+        # Pas de résiduelle — sortie pure de la cross-attention
+        out = self.ffn(self.norm_ffn(h))          # (B, 1, emb_dim)
+        z   = self.norm_out(out.squeeze(1))       # (B, emb_dim)
+        return self.head(z), attn_weights
+
+        # q = q + h                          # résiduelle sur le token label
 
         # ── FFN sur le token label ────────────────────────────────────
-        q = q + self.ffn(self.norm_ffn(q))
+        # q = q + self.ffn(self.norm_ffn(q))
 
-        # ── Classification ────────────────────────────────────────────
-        z = self.norm_out(q.squeeze(1))    # (B, emb_dim)
-        return self.head(z), attn_weights  # (B, n_classes), (B, 1, k)
 
 # class ABMILLabelPredictor(nn.Module):
 #     """

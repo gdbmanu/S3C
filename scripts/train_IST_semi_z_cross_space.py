@@ -25,7 +25,7 @@ from torchvision import datasets
 from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor, TransformerLabelHead
+from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor, TransformerLabelHead, TransformerPosPredictor
 
 import timm
 
@@ -66,14 +66,14 @@ orig = False
 grid = False
 curriculum = False
 
-train_epochs = 100
+train_epochs = 30 #100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
 supervised = True
 if supervised:
     pure = False
-    alpha = 3e-6 #1e-6 #1e-5 #3e-7
+    alpha = 3e-6 #1e-6 # #1e-5 #3e-7
     beta = 3e-5
 else:
     pure = False
@@ -88,7 +88,8 @@ test3 = False # no sample diversity
 strict_global_step = False
 cross_integration = True # cross_draws_integration
 
-abmil_pos = True
+abmil_pos = False
+trans_pos = True
 
 abmil_label = False
 trans_label = True
@@ -122,6 +123,7 @@ if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 if abmil_pos : suffix = suffix + "_APOS2"
+if trans_pos : suffix = suffix + "_TRANSPOS"
 if abmil_label : suffix = suffix + "_ALAB2"
 if trans_label : suffix = suffix + "_TRANSLAB"
 
@@ -191,6 +193,8 @@ draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 
 if abmil_pos:
     pos_predictor = ABMILPosPredictor(embed_dim, k)
+elif trans_pos:
+    pos_predictor = TransformerPosPredictor(emb_dim=embed_dim)
 else:
     pos_predictor = PosPredictor(embed_dim, k)
 
@@ -437,7 +441,10 @@ for epoch in range(train_epochs):
             else:
                 centers = output_t.mean(dim=1)
 
-            pos_pred = pos_predictor(centers, z_probe)
+            if abmil_pos or trans_pos:
+                pos_pred, _ = pos_predictor(centers, z_probe)
+            else:
+                pos_pred = pos_predictor(centers, z_probe)
 
             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
             loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -483,7 +490,7 @@ for epoch in range(train_epochs):
 
             if supervised:
                 #output_t_head = linear_head(z_center)
-                if abmil_label:
+                if abmil_label or trans_label:
                     output_t_head, _ = linear_head(centers, labels)
                 else:
                     output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
@@ -544,6 +551,9 @@ for epoch in range(train_epochs):
             seeds_correct = [0.0 for j in range(k)]
             val_iter = iter(val_loader)
 
+            if trans_label:
+                correct_sup = 0.0
+
             with torch.no_grad():
                 for n_val in range(5):
                     features, sxs, sys_, labels = next(val_iter)
@@ -592,7 +602,10 @@ for epoch in range(train_epochs):
                         else:
                             centers = output_t.mean(dim=1)     
 
-                        pos_pred = pos_predictor(centers, z_probe)
+                        if abmil_pos or trans_pos:
+                            pos_pred, w_pos = pos_predictor(centers, z_probe)
+                        else:
+                            pos_pred = pos_predictor(centers, z_probe)
 
                         pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                         loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -640,8 +653,10 @@ for epoch in range(train_epochs):
 
                         #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
 
-                        if abmil_label:
-                            output_t_head, _ = linear_head(centers, labels)
+                        if abmil_label or trans_label:
+                            output_t_head, w_lab = linear_head(centers) #, labels)
+                            if trans_label:
+                                output_t_head_sup, w_lab_sup = linear_head(centers) #, labels)
                         else:
                             output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                         #output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
@@ -659,8 +674,14 @@ for epoch in range(train_epochs):
                         if cross_integration:
                             if k>1:
                                 for i in range(k):
-                                    print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy())
+                                    print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
                                 #print("global", w[0,...].detach().float().cpu().numpy())
+                                if abmil_pos or trans_pos:
+                                    print("pos seed mixture:", w_pos[0,...].detach().float().cpu().numpy())
+                                if abmil_label or trans_label:
+                                    print("label seed mixture:", w_lab[0,...].detach().float().cpu().numpy())
+                                    if trans_label:
+                                        print("oracle label seed mixture:", w_lab[0,...].detach().float().cpu().numpy())
                             else:
                                 print(w[0,...].detach().float().cpu().numpy())
                     
@@ -673,9 +694,15 @@ for epoch in range(train_epochs):
                     running_label += loss_label.item()
                     running_pos += loss_pos.item()
 
+                    if trans_label:
+                        preds_sup = output_t_head_sup.argmax(dim=1)
+                        correct_sup += (preds_sup == labels).sum().item()
+
                     total += labels.size(0)
 
             print(f"Global accuracy: {100 * correct / total:.2f}%")
+            if trans_label:
+                print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
             for j in range(k):
                 print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
 
