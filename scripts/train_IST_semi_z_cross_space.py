@@ -656,7 +656,7 @@ for epoch in range(train_epochs):
                         if abmil_label or trans_label:
                             output_t_head, w_lab = linear_head(centers) #, labels)
                             if trans_label:
-                                output_t_head_sup, w_lab_sup = linear_head(centers) #, labels)
+                                output_t_head_sup, w_lab_sup = linear_head(centers, labels)
                         else:
                             output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                         #output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
@@ -681,7 +681,7 @@ for epoch in range(train_epochs):
                                 if abmil_label or trans_label:
                                     print("label seed mixture:", w_lab[0,...].detach().float().cpu().numpy())
                                     if trans_label:
-                                        print("oracle label seed mixture:", w_lab[0,...].detach().float().cpu().numpy())
+                                        print("oracle label seed mixture:", w_lab_sup[0,...].detach().float().cpu().numpy())
                             else:
                                 print(w[0,...].detach().float().cpu().numpy())
                     
