@@ -101,6 +101,8 @@ if not mixed:
     trans_label = True
     if trans_label:
         softmax = False
+else:
+    residual = True
 
 suffix = ""
 if supervised : 
@@ -140,6 +142,8 @@ if not mixed:
         suffix = suffix + "_TRANSLAB"
 else: 
     suffix = suffix + "_MIXED"
+    if residual:
+        suffix = suffix + "_RES"
 
 if orig: suffix = suffix + "_ORIG"
 
@@ -240,20 +244,29 @@ if not mixed:
                         nn.Linear(k * embed_dim, 1000),
                     )
 else:
-    pos_predictor = nn.Identity()
-    classes = ResNet50_Weights.DEFAULT.meta['categories']
-    print(len(classes))      # 1000
-    print(classes[0])        # 'tench'
-    print(classes[999])      # 'toilet tissue'
-    # Pour CLIP
-    texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
-    model, _ = clip.load("ViT-L/14")
-    model.eval().cuda()
-    with torch.no_grad():
-        label_embeddings = model.encode_text(texts)        # (1000, 768)
-    del model
-    torch.cuda.empty_cache()
-    linear_head = TransformerMixedHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, softmax=softmax)
+    if supervised:
+        pos_predictor = nn.Identity()
+        classes = ResNet50_Weights.DEFAULT.meta['categories']
+        print(len(classes))      # 1000
+        print(classes[0])        # 'tench'
+        print(classes[999])      # 'toilet tissue'
+        # Pour CLIP
+        texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
+        model, _ = clip.load("ViT-L/14")
+        model.eval().cuda()
+        with torch.no_grad():
+            label_embeddings = model.encode_text(texts)        # (1000, 768)
+        del model
+        torch.cuda.empty_cache()
+        linear_head = TransformerMixedHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, residual=residual)
+    else:
+        pos_predictor = TransformerMixedHead(emb_dim=embed_dim, n_heads=n_heads, residual=residual)
+        linear_head = nn.Sequential(
+                        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+                        nn.LayerNorm(embed_dim),                  # norm par seed ✓
+                        nn.Flatten(1),    
+                        nn.Linear(k * embed_dim, 1000),
+                    )
 
 seeds_mlp = nn.Sequential(
     nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
@@ -356,14 +369,6 @@ if supervised:
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
             weight_decay=3e-4, #0.04,  
         )
-        '''{'params': linear_head.attn.parameters(), 'lr': alpha * 3},
-            {'params': linear_head.head.parameters(), 'lr': alpha},
-            {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
-            # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
-            {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
-            {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
-            {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
-            {'params': [linear_head.cls_token],                   'lr': alpha*10}],'''
     else:
         linear_optimizer = torch.optim.AdamW(
             [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
@@ -373,14 +378,6 @@ if supervised:
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
             weight_decay=1e-3, #0.04,  
         )
-        '''{'params': linear_head.attn.parameters(), 'lr': alpha * 3},
-            {'params': linear_head.seed_transform.parameters(), 'lr': alpha},
-            {'params': linear_head.head.parameters(), 'lr': alpha},
-            # Le reste des paramètres (embeddings, layernorms) avec un lr par défaut
-            {'params': linear_head.label_embedding.parameters(), 'lr': alpha*10},
-            {'params': linear_head.norm_label.parameters(),      'lr': alpha*10},
-            {'params': linear_head.norm_s.parameters(),           'lr': alpha*10},
-            {'params': [linear_head.cls_token],                   'lr': alpha*10}],'''
 else:
     optimizer = torch.optim.AdamW([
         {'params': ist_transformer.parameters(), 'lr': 3e-5},
@@ -429,7 +426,7 @@ history = {"epoch": [], "batch": [], "loss": [],
 for j in range(k):
     history[f"classif {j}"] = []
 history[f"classif"] = []
-if trans_label or mixed:
+if supervised and (mixed or trans_label):
     history[f"sup classif"] = []
 
 os.makedirs(save_dir, exist_ok=True)
@@ -553,8 +550,19 @@ for epoch in range(train_epochs):
                         loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                if not mixed:
+                    if abmil_pos or trans_pos:
+                        pos_pred, _ = pos_predictor(centers, z_probe)
+                    else:
+                        pos_pred = pos_predictor(centers, z_probe)     
+                else:
+                    _, pos_pred, _ = pos_predictor(centers, z_probe)
+                pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
+                loss_pos = F.mse_loss(pos_pred, pos_target)
+
                 output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
+
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
 
         if not supervised:
@@ -604,7 +612,7 @@ for epoch in range(train_epochs):
             seeds_correct = [0.0 for j in range(k)]
             val_iter = iter(val_loader)
 
-            if trans_label:
+            if mixed or trans_label:
                 correct_sup = 0.0
 
             with torch.no_grad():
@@ -713,11 +721,16 @@ for epoch in range(train_epochs):
                             else:
                                 output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                         else:
-                            output_t_head, pos_pred, w = linear_head(centers, z_probe)
-                            output_t_head_sup, _, w_sup = linear_head(centers, z_probe, labels)
-                            w_lab = w[:, 0, :]
-                            w_lab_sup = w_sup[:, 0, :]
-                            w_pos = w[:, 1, :]
+                            if supervised:
+                                output_t_head, pos_pred, w = linear_head(centers, z_probe)
+                                output_t_head_sup, _, w_sup = linear_head(centers, z_probe, labels)
+                                w_lab = w[:, 0, :]
+                                w_lab_sup = w_sup[:, 0, :]
+                                w_pos = w[:, 1, :]
+                            else:
+                                _, pos_pred, w = pos_predictor(centers, z_probe)
+                                w_pos = w[:, 1, :]
+                                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
                         
                         pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                         loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -738,11 +751,11 @@ for epoch in range(train_epochs):
                                 for i in range(k):
                                     print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
                                 #print("global", w[0,...].detach().float().cpu().numpy())
-                                if abmil_pos or trans_pos:
+                                if mixed or abmil_pos or trans_pos:
                                     print("pos seed mixture:", w_pos[0,...].detach().float().cpu().numpy().flatten())
-                                if abmil_label or trans_label:
+                                if supervised and (mixed or abmil_label or trans_label):
                                     print("label seed mixture:", w_lab[0,...].detach().float().cpu().numpy().flatten())
-                                    if trans_label:
+                                    if mixed or trans_label:
                                         print("oracle label seed mixture:", w_lab_sup[0,...].detach().float().cpu().numpy().flatten())
                             else:
                                 print(w[0,...].detach().float().cpu().numpy())
@@ -756,14 +769,14 @@ for epoch in range(train_epochs):
                     running_label += loss_label.item()
                     running_pos += loss_pos.item()
 
-                    if trans_label:
+                    if supervised and (mixed or trans_label):
                         preds_sup = output_t_head_sup.argmax(dim=1)
                         correct_sup += (preds_sup == labels).sum().item()
 
                     total += labels.size(0)
 
             print(f"Global accuracy: {100 * correct / total:.2f}%")
-            if trans_label or mixed:
+            if supervised and (mixed or trans_label):
                 print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
             for j in range(k):
                 print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
@@ -771,7 +784,7 @@ for epoch in range(train_epochs):
             history["classif"].append(100 * correct / total)
             for j in range(k):
                 history[f"classif {j}"].append(100 * seeds_correct[j] / total)
-            if trans_label or mixed:
+            if supervised and (mixed or trans_label):
                 history[f"sup classif"].append(100 * correct_sup / total)
             history["loss_sigreg"].append(running_sigreg / total)
             history["loss_jepa"].append(running_jepa / total)

@@ -425,7 +425,7 @@ class TransformerMixedHead(nn.Module):
     labels : (B,) — entiers
     """
     def __init__(self, emb_dim=768, n_heads=8, 
-                 n_classes=1000, pretrained_embeddings=None,  dropout=0.1):
+                 n_classes=1000, pretrained_embeddings=None,  dropout=0.1, residual=False):
         super().__init__()
 
         # Token label — embedding appris
@@ -440,7 +440,8 @@ class TransformerMixedHead(nn.Module):
         self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
 
         # Norms Pre-LN
-        self.norm_q  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.norm_z  = nn.LayerNorm(emb_dim)   # sur le token label
         self.norm_kv = nn.LayerNorm(emb_dim)   # sur les seeds
 
         # Cross-attention : label (Q) × seeds (K, V)
@@ -449,8 +450,18 @@ class TransformerMixedHead(nn.Module):
         )
 
         # FFN sur le token label après cross-attention
-        self.norm_ffn = nn.LayerNorm(emb_dim)
-        self.ffn = nn.Sequential(
+        self.label_norm_ffn = nn.LayerNorm(emb_dim)
+        self.pos_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.label_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.pos_ffn = nn.Sequential(
             nn.Linear(emb_dim, 4 * emb_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -462,6 +473,7 @@ class TransformerMixedHead(nn.Module):
         self.norm_out = nn.LayerNorm(emb_dim)
         self.label_head = nn.Linear(emb_dim, n_classes)
         self.pos_head = nn.Linear(emb_dim, 2)
+        self.residual = residual
 
     def forward(self, s, z, labels=None):
         """
@@ -482,21 +494,25 @@ class TransformerMixedHead(nn.Module):
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
 
         # (B, 2, emb_dim) — token label + token z
-        q = torch.stack([l_emb, z], dim=1)
-        q_norm  = self.norm_q(q)                              # norm partagée ✓
+        l_norm  = self.norm_l(l_emb).unsqueeze(1)                              # norm partagée ✓
+        z_norm =  self.norm_z(z).unsqueeze(1)
         kv_norm = self.norm_kv(s)
 
-        h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)  # (B, 2, emb_dim)
-        out      = self.ffn(self.norm_ffn(h))                 # (B, 2, emb_dim)
-        out_norm = self.norm_out(out)                         # (B, 2, emb_dim)
+        h_label, attn_label = self.cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+        label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
+        label_out_norm = self.norm_out(label_out).squeeze(1)                         # (B, emb_dim)
 
-        return (self.label_head(out_norm[:, 0, :]),   # (B, n_classes)
-                self.pos_head(out_norm[:, 1, :]),      # (B, 2)
-                attn_weights)                          # (B, 2, k)
-    
+        h_pos, attn_pos = self.cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
+        if self.residual:
+            h_pos = z_norm + h_pos
+            pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+        else:
+            pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+        pos_out_norm = self.norm_out(pos_out).squeeze(1)                         # (B emb_dim)
 
-      
-            
+        return (self.label_head(label_out_norm),
+                self.pos_head(pos_out_norm),
+                torch.cat([attn_label, attn_pos], dim=1))   
         
         
 
