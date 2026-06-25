@@ -164,8 +164,8 @@ class ABMILPosPredictor(nn.Module):
         h = (w * s_norm).sum(dim=1)
 
         hz = torch.cat([h, z_norm], dim=-1)
-        hz = self.combine(hz)
-        return self.head(hz) 
+        out = self.combine(hz)
+        return self.head(out), w
 
 
         '''for i in range(self.k):
@@ -321,11 +321,18 @@ class TransformerLabelHead(nn.Module):
     labels : (B,) — entiers
     """
     def __init__(self, emb_dim=768, n_heads=8, 
-                 n_classes=1000, label_emb_dim=32, dropout=0.1):
+                 n_classes=1000, pretrained_embeddings=None, softmax=False, dropout=0.1, n_iter=3):
         super().__init__()
 
         # Token label — embedding appris
-        self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+            # Optionnel : geler les embeddings
+            self.label_embedding.weight.requires_grad = False
+        else:
+            self.label_embedding = nn.Embedding(n_classes, emb_dim)
         #self.norm_label = nn.LayerNorm(emb_dim)
         self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
 
@@ -355,6 +362,8 @@ class TransformerLabelHead(nn.Module):
         # Tête de classification
         self.norm_out = nn.LayerNorm(emb_dim)
         self.head = nn.Linear(emb_dim, n_classes)
+        self.n_iter = n_iter
+        self.softmax = softmax
 
     def forward(self, s, labels=None):
         """
@@ -375,26 +384,121 @@ class TransformerLabelHead(nn.Module):
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
 
         q = l_emb.unsqueeze(1)             # (B, 1, emb_dim) — token unique
-
         # ── Pre-LN ───────────────────────────────────────────────────
         q_norm  = self.norm_q(q)           # (B, 1, emb_dim)
         kv_norm = self.norm_kv(s)          # (B, k, emb_dim)
 
-        # ── Cross-attention : label queye les seeds ───────────────────
-        # Q = label token, K = V = seeds
-        # Pas de self-attention → pas de leak possible
-        h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)
+        if labels is not None:
+            # ── Cross-attention : label querye les seeds ───────────────────
+            # Q = label token, K = V = seeds
+            # Pas de self-attention → pas de leak possible
+            h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)
 
-        # Pas de résiduelle — sortie pure de la cross-attention
-        out = self.ffn(self.norm_ffn(h))          # (B, 1, emb_dim)
-        z   = self.norm_out(out.squeeze(1))       # (B, emb_dim)
+            # Pas de résiduelle — sortie pure de la cross-attention
+            out = self.ffn(self.norm_ffn(h))          # (B, 1, emb_dim)
+            z   = self.norm_out(out.squeeze(1))       # (B, emb_dim)
+            
+        else: # Bootstrap sur les labels
+            for i in range(self.n_iter):
+                h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)
+                out = self.ffn(self.norm_ffn(h)) 
+                z   = self.norm_out(out.squeeze(1))  
+                if i < self.n_iter - 1:
+                    logits = self.head(z)
+                    if self.softmax:
+                        probs = torch.softmax(logits, dim=-1)      # (B, n_classes)
+                        l_emb = probs @ self.label_embedding.weight
+                    else:
+                        pred_labels = logits.argmax(dim=-1)
+                        l_emb = self.label_embedding(pred_labels)  # (B, label_emb_dim)
+                    q = l_emb.unsqueeze(1) 
+                    q_norm  = self.norm_q(q) 
         return self.head(z), attn_weights
+        
+class TransformerMixedHead(nn.Module):
+    """
+    Cross-attention : label (Q) × seeds (K, V)
+    Le token label queye les seeds pour extraire
+    l'information pertinente pour la classification.
+    
+    s      : (B, k, emb_dim)
+    labels : (B,) — entiers
+    """
+    def __init__(self, emb_dim=768, n_heads=8, 
+                 n_classes=1000, pretrained_embeddings=None,  dropout=0.1):
+        super().__init__()
 
-        # q = q + h                          # résiduelle sur le token label
+        # Token label — embedding appris
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+            # Optionnel : geler les embeddings
+            self.label_embedding.weight.requires_grad = False
+        else:
+            self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
 
-        # ── FFN sur le token label ────────────────────────────────────
-        # q = q + self.ffn(self.norm_ffn(q))
+        # Norms Pre-LN
+        self.norm_q  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.norm_kv = nn.LayerNorm(emb_dim)   # sur les seeds
 
+        # Cross-attention : label (Q) × seeds (K, V)
+        self.cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        # FFN sur le token label après cross-attention
+        self.norm_ffn = nn.LayerNorm(emb_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        # Tête de classification
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.label_head = nn.Linear(emb_dim, n_classes)
+        self.pos_head = nn.Linear(emb_dim, 2)
+
+    def forward(self, s, z, labels=None):
+        """
+        s      : (B, k, emb_dim)
+        labels : (B,) entiers — None à l'inférence
+        """
+        B = s.shape[0]
+
+        # ── Token label ───────────────────────────────────────────────
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=s.device) < 0.2
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
+        elif labels is not None:
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
+
+        # (B, 2, emb_dim) — token label + token z
+        q = torch.stack([l_emb, z], dim=1)
+        q_norm  = self.norm_q(q)                              # norm partagée ✓
+        kv_norm = self.norm_kv(s)
+
+        h, attn_weights = self.cross_attn(q_norm, kv_norm, kv_norm)  # (B, 2, emb_dim)
+        out      = self.ffn(self.norm_ffn(h))                 # (B, 2, emb_dim)
+        out_norm = self.norm_out(out)                         # (B, 2, emb_dim)
+
+        return (self.label_head(out_norm[:, 0, :]),   # (B, n_classes)
+                self.pos_head(out_norm[:, 1, :]),      # (B, 2)
+                attn_weights)                          # (B, 2, k)
+    
+
+      
+            
+        
+        
 
 # class ABMILLabelPredictor(nn.Module):
 #     """
