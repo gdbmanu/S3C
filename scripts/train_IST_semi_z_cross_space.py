@@ -77,8 +77,8 @@ mu = 1               # spatial probe weight
 supervised = True
 if supervised:
     pure = False
-    alpha = 1e-6 #3e-6 # #1e-5 #3e-7
-    beta = 1e-4 #3e-4
+    alpha = 3e-6 #1e-6 # #1e-5 #3e-7
+    beta = 1e-4
 else:
     pure = False
 
@@ -124,7 +124,14 @@ if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
 if cross_integration : suffix = suffix + "_CROSS"
 if curriculum:
-    load_dir = f"../checkpoints/260528_IST1+ABMIL_semi_z_lam0.05_sab2_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_(**)"
+    #load_dir = f"../checkpoints/260528_IST1+ABMIL_semi_z_lam0.05_sab2_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_(**)"
+    #load_dir = "../checkpoints/260614_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_alph1e-06_TEST_CROSS_s3_t5_space_(*)"
+    #load_dir = "../checkpoints/260616_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a1e-06_TEST_CROSS_APOS_s3_t5_space"
+    #load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_TEST_CROSS_APOS_s3_t5_space"
+    if supervised:
+        load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a1e-06_TEST_CROSS_APOS2_s3_t5_space"
+    else:
+        load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_TEST_CROSS_APOS2_s3_t5_space"
     suffix = suffix + "_CURRI"
 if grid : 
     suffix = suffix + "_GRID"
@@ -289,7 +296,7 @@ if k>1:                                     # cross-draws integration (seed dive
         ])
 
 if curriculum:
-    epoch_ist = 100
+    epoch_ist = 30
     checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_ist}.pt")  # exemple
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     # Vérifie les clés disponibles
@@ -327,13 +334,13 @@ if curriculum:
     print("❗ Paramètres manquants :", missing)
     print("⚠️ Paramètres inattendus :", unexpected)
 
-    if "seeds_mlp" not in checkpoint:
+    '''if "seeds_mlp" not in checkpoint:
         raise KeyError(f"Aucune clé 'seeds_mlp' trouvée dans {checkpoint_path}")
     state_dict = checkpoint["seeds_mlp"]
     missing, unexpected = seeds_mlp.load_state_dict(state_dict, strict=False)
     print("➡️ Poids chargés (seeds_mlp).")
     print("❗ Paramètres manquants :", missing)
-    print("⚠️ Paramètres inattendus :", unexpected)
+    print("⚠️ Paramètres inattendus :", unexpected)'''
 
 
 ist_transformer.to(device)
@@ -379,12 +386,21 @@ if supervised:
             weight_decay=1e-3, #0.04,  
         )
 else:
-    optimizer = torch.optim.AdamW([
-        {'params': ist_transformer.parameters(), 'lr': 3e-5},
-        {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-        {'params': pos_predictor.parameters(),       'lr': 3e-4}, # 1e-4
-        {'params': seeds_mlp.parameters(),       'lr': 3e-4},
-    ], weight_decay=1e-3)
+    if curriculum:
+        optimizer = torch.optim.AdamW(
+            [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
+            {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
+            {'params': pos_predictor.parameters(),       'lr': 3e-5}, #1e-5},
+            {'params': seeds_mlp.parameters(),       'lr': 1e-4}], #1e-5},
+            weight_decay=3e-4, #0.04,  
+        )
+    else:
+        optimizer = torch.optim.AdamW([
+            {'params': ist_transformer.parameters(), 'lr': 3e-5},
+            {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
+            {'params': pos_predictor.parameters(),       'lr': 3e-4},
+            {'params': seeds_mlp.parameters(),       'lr': 3e-4},
+        ], weight_decay=1e-3)
 
     linear_optimizer = torch.optim.AdamW(
         linear_head.parameters(),
@@ -406,15 +422,17 @@ mse = nn.MSELoss()
 #sigreg = SIGReg()
 
 schedule = True
+if train_epochs > 30:
+    n_warm = train_epochs // 6
 if schedule:
     if supervised:
-        warmup = LinearLR(linear_optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-        cosine = CosineAnnealingLR(linear_optimizer, T_max=train_epochs - 5)
-        scheduler = SequentialLR(linear_optimizer, schedulers=[warmup, cosine], milestones=[5])
+        warmup = LinearLR(linear_optimizer, start_factor=0.1, end_factor=1.0, total_iters=n_warm)
+        cosine = CosineAnnealingLR(linear_optimizer, T_max=train_epochs - n_warm)
+        scheduler = SequentialLR(linear_optimizer, schedulers=[warmup, cosine], milestones=[n_warm])
     else:
-        warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-        cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
-        scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
+        warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=n_warm)
+        cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - n_warm)
+        scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[n_warm])
 
 
 # %%

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from s3c.models.foveated_vit import FoveatedMultiViT, build_foveated_pos_embed
 from s3c.models.heads import FovealSetTransformer
-from s3c.data.datasets import FoveatedUpletDataset, FoveatedGridDataset, make_dataloader
+from s3c.data.datasets import FoveatedUpletDataset, make_dataloader
 from s3c.data.transforms import ShiftZoomUplet, FoveatedPyramidTransform
 
 import timm
@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 14 #56
+batch_size = 56
 num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -42,9 +42,6 @@ resolution = 128
 embed_dim = 768
 
 n_uplet = 30
-grid=True
-orig = True
-n_grid = 11
 
 
 # Monter le dossier distant
@@ -58,6 +55,7 @@ if local == False:
     except:
         pass
 
+    # Ton code ici, en utilisant mount_point
     train_dir = os.path.join(mount_point, "train")
     val_dir = os.path.join(mount_point, "val")
 else:
@@ -66,7 +64,7 @@ else:
 
 load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-save_dir = "data/Imagenet_grid_orig_Z" #"data/Imagenet_grid_Z"
+save_dir = "data/Imagenet_Z_orig"
 
 epoch_teacher = 20
 
@@ -92,8 +90,9 @@ build_foveated_pos_embed(model_orig,
 
 model = FoveatedMultiViT(model_orig, norm=False)
 
-if not orig:
+if False:
     checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_teacher}.pt")  # exemple
+
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     # Vérifie les clés disponibles
     print("Clés du checkpoint :", checkpoint.keys())
@@ -132,42 +131,14 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
     """
     print(f"\n── Génération embeddings — {split} ──────────────────────────")
     
-    if not grid:
-        dataset = FoveatedUpletDataset(
-            base_folder=dataset_raw, # ImageFolder
-            zoom=zoom,
-            std=std,
-            start_center=False, 
-            n_uplet=n_sac,
-            path=True
-        )
-    else:
-        dataset = FoveatedGridDataset(
-            base_folder=dataset_raw, # ImageFolder
-            zoom=zoom,
-            n_grid=n_grid,
-            path=True
-        )
-
-    from torch.utils.data import Subset
-
-    '''# Calculer la taille des 10% finaux
-    dataset_size = len(dataset)
-    last_7_percent_size = int(0.07 * dataset_size)
-    start_idx = dataset_size - last_7_percent_size
-
-    # Créer un sous-ensemble avec les derniers 10%
-    subset_indices = range(start_idx, dataset_size)
-    last_7_percent_dataset = Subset(dataset, subset_indices)
-
-    # Créer le DataLoader sur ce sous-ensemble
-    loader = DataLoader(
-        last_7_percent_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-    )'''
-
+    dataset = FoveatedUpletDataset(
+        base_folder=dataset_raw, # ImageFolder
+        zoom=zoom,
+        std=std,
+        start_center=False, 
+        n_uplet=n_sac,
+        path=True
+    )
      
     loader  = DataLoader(
         dataset,
@@ -183,21 +154,6 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
                 else torch.float16
 
     for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
-
-        skip = False
-        for i, rel_path in enumerate(rel_paths):
-            out_path = out_root / rel_path
-            out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
-
-            # skip si déjà généré (reprise après interruption)
-            if out_path.exists():
-                skipped += 1
-                print(f'{out_path} skip')
-                skip = True
-                continue
-        if skip:
-            continue
-
         # imgs : (B, n_sac, 3, H, W)
         imgs = imgs.to(device)
 
@@ -211,10 +167,9 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
             out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
 
             # skip si déjà généré (reprise après interruption)
-            '''if out_path.exists():
+            if out_path.exists():
                 skipped += 1
-                print(f'{out_path} skip')
-                continue'''
+                continue
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             # Sauvegarder z[i], xs[i], et ys[i] dans un dictionnaire
@@ -234,9 +189,8 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
 if __name__ == "__main__":
     # charger modèle
 
-    for split, dataset_raw in [#("train", train_dataset_raw),
-                               ("val",   val_dataset_raw),
-                               ]:
+    for split, dataset_raw in [("train", train_dataset_raw),
+                               ("val",   val_dataset_raw)]:
         generate_embeddings(
             model           = model,       # FoveatedMultiViT déjà chargé
             split           = split,
