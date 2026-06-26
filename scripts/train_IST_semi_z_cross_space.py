@@ -70,14 +70,14 @@ orig = False
 grid = False
 curriculum = False
 
-train_epochs = 30 #100
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
 supervised = True
 if supervised:
     pure = False
-    alpha = 3e-6 #1e-6 # #1e-5 #3e-7
+    alpha = 1e-6 #3e-6 # #1e-5 #3e-7
     beta = 1e-4 #3e-4
 else:
     pure = False
