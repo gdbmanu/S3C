@@ -67,10 +67,18 @@ n_student_draws = 4
 n_teacher_draws = 3
 
 orig = False
-grid = False
+grid = True
 curriculum = False
 
-train_epochs = 100
+if grid:
+    n_saccades_max = 121
+    n_uplet_student = 3
+    n_uplet_teacher = 7
+    n_student_draws = 6
+    n_teacher_draws = 3
+
+
+train_epochs = 30 #100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
@@ -135,7 +143,7 @@ if curriculum:
     suffix = suffix + "_CURRI"
 if grid : 
     suffix = suffix + "_GRID"
-    n_saccades_max = 121
+    
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
@@ -424,6 +432,8 @@ mse = nn.MSELoss()
 schedule = True
 if train_epochs > 30:
     n_warm = train_epochs // 6
+else:
+    n_warm = 5
 if schedule:
     if supervised:
         warmup = LinearLR(linear_optimizer, start_factor=0.1, end_factor=1.0, total_iters=n_warm)
