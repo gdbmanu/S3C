@@ -516,118 +516,6 @@ class TransformerMixedHead(nn.Module):
         
         
 
-# class ABMILLabelPredictor(nn.Module):
-#     """
-#     Prédit le label ImageNet depuis les k seeds.
-#     Le label (encodé) est injecté dans self.attn pour conditionner
-#     la sélection des seeds — mais à l'inférence, le label n'est pas
-#     disponible, donc on peut aussi utiliser un token CLS appris.
-    
-#     s : (B, k, emb_dim)
-#     l : (B,) indices de labels entiers — optionnel à l'inférence
-#     """
-#     def __init__(self, emb_dim=768, k=1, hidden_dim=768,
-#                  n_classes=1000, label_emb_dim=128, label_hidden_dim=768):
-#         super().__init__()
-#         self.k = k
-#         self.label_emb_dim = label_emb_dim
-
-#         # Embedding du label : 1000 classes → label_emb_dim
-#         self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
-#         self.norm_label = nn.LayerNorm(label_emb_dim)
-
-#         # Token CLS appris — utilisé à l'inférence quand le label est inconnu
-#         self.cls_token = nn.Parameter(torch.randn(1, label_emb_dim))
-
-#         # LayerNorm distinct par seed
-#         self.norm_s = nn.ModuleList([
-#             nn.LayerNorm(emb_dim) for _ in range(k)
-#         ])
-
-#         # Projection des seeds vers hidden_dim
-#         self.seed_transform = nn.ModuleList([
-#             nn.Sequential(
-#                 nn.Linear(emb_dim, hidden_dim),
-#                 nn.ReLU(),
-#                 nn.Linear(hidden_dim, hidden_dim),
-#             )
-#             for _ in range(k)
-#         ])
-
-#         # Projection du label vers hidden_dim
-#         self.label_transform = nn.Sequential(
-#             nn.Linear(label_emb_dim, hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(hidden_dim, hidden_dim),
-#         )
-
-#         # ABMIL conditionné sur le label
-#         self.attn = nn.Sequential(
-#             nn.Linear(2 * hidden_dim, 256),
-#             nn.Tanh(),
-#             nn.Linear(256, 1),
-#         )
-
-#         # Combinaison seed agrégé + label
-#         self.combine = nn.Sequential(
-#             nn.Linear(2 * hidden_dim, 2 * hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(2 * hidden_dim, label_hidden_dim),
-#             nn.ReLU(),
-#         )
-
-#         self.head = nn.Linear(label_hidden_dim, n_classes)
-
-#     def forward(self, s, labels=None):
-#         # s      : (B, k, emb_dim)
-#         # labels : (B,) entiers — None à l'inférence
-#         B = s.shape[0]
-
-#         if s.dim() == 2:
-#             s = s.unsqueeze(1)
-
-#         # ── Encoding du label ─────────────────────────────────────────
-#         if labels is not None:
-#             l_emb = self.label_embedding(labels)       # (B, label_emb_dim)
-#             l_emb = self.norm_label(l_emb)
-#         else:
-#             # À l'inférence : token CLS appris, partagé sur le batch
-#             l_emb = self.cls_token.expand(B, -1)       # (B, label_emb_dim)
-
-#         if labels is not None and self.training:
-#             # Masquer aléatoirement le label pendant l'entraînement
-#             mask = torch.rand(B, device=s.device) < 0.2   # 20% du temps
-#             l_emb = self.label_embedding(labels)
-#             cls_expanded = self.cls_token.expand(B, -1)
-#             # Remplacer par cls_token là où le label est masqué
-#             l_emb = torch.where(mask.unsqueeze(1), cls_expanded, l_emb)
-#         elif labels is None:
-#             l_emb = self.cls_token.expand(B, -1)
-
-#         l_emb = self.norm_label(l_emb)
-
-#         l_transformed = self.label_transform(l_emb)    # (B, hidden_dim)
-
-#         # ── Projection des seeds ──────────────────────────────────────
-#         s_norm = torch.stack([
-#             self.seed_transform[i](self.norm_s[i](s[:, i, :]))
-#             for i in range(self.k)
-#         ], dim=1)                                       # (B, k, hidden_dim)
-
-#         # ── ABMIL conditionné sur le label ────────────────────────────
-#         l_exp = l_transformed.unsqueeze(1).expand(-1, self.k, -1)  # (B, k, hidden_dim)
-#         sl = torch.cat([s_norm, l_exp], dim=-1)        # (B, k, 2*hidden_dim)
-
-#         w = self.attn(sl)                              # (B, k, 1)
-#         w = torch.softmax(w, dim=1)
-#         h = (w * s_norm).sum(dim=1)                    # (B, hidden_dim)
-
-#         # ── Combinaison + prédiction ──────────────────────────────────
-#         hl = torch.cat([h, l_transformed], dim=-1)     # (B, 2*hidden_dim)
-#         hl = self.combine(hl)                          # (B, hidden_dim)
-
-#         return self.head(hl), w                        # (B, n_classes), (B, k, 1)
-    
     
 class ABMILPosPredictor(nn.Module):
     """
@@ -734,6 +622,295 @@ class ABMILPosPredictor(nn.Module):
         h = (w * hs).sum(dim=1)              # (B, hidden_dim)
         return self.head(h)                  # (B, out_dim)'''
     
+
+
+class SeedBlock(nn.Module):
+    """
+    Un bloc = 
+      - self-attention sur les vues (les vues se transforment entre elles)
+      - cross-attention seeds → vues (seeds lisent les vues transformées)
+      - self-attention sur les seeds (seeds se coordonnent)
+    """
+    def __init__(self, d_model, n_heads, dropout=0.1, self_att=False):
+        super().__init__()
+
+        # Self-attention sur les vues
+        self.view_self_attn = nn.MultiheadAttention(
+            d_model, n_heads, dropout=dropout, batch_first=True
+        )
+        self.view_norm1 = nn.LayerNorm(d_model)
+        self.view_ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
+        )
+        self.view_norm2 = nn.LayerNorm(d_model)
+
+        # Cross-attention : seeds lisent les vues
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm1 = nn.LayerNorm(d_model)
+
+        # Self-attention sur les seeds
+        self.self_att = self_att
+        if self_att:
+            self.seed_self_attn = nn.MultiheadAttention(
+                d_model, n_heads, dropout=dropout, batch_first=True
+            )
+            self.seed_norm2 = nn.LayerNorm(d_model)
+
+        self.seed_ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
+        )
+        self.seed_norm3 = nn.LayerNorm(d_model)
+
+
+    def forward(self, seeds, views):
+        # ── 1. Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm1(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        views = views + h_views
+        v2 = self.view_norm2(views)
+        views = views + self.view_ffn(v2)
+
+        # ── 2. Seeds lisent les vues transformées ─────────────────────
+        s = self.seed_norm1(seeds)
+        h_seeds, _ = self.cross_attn(s, v2, v2)
+        seeds = seeds + h_seeds 
+
+        # ── 3. Seeds se coordonnent ───────────────────────────────────
+        if self.self_att:
+            s2 = self.seed_norm2(seeds)
+            h_self, _ = self.seed_self_attn(s2, s2, s2)
+            seeds = seeds + h_self
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
+        else:
+            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
+
+        return seeds, views   # les deux évoluent
+
+
+class IterativeSeedTransformer(nn.Module):
+    def __init__(self, input_dim=768, d_model=768,
+                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1, self_att=False, normalize=False):
+        super().__init__()
+        self.proj  = (nn.Linear(input_dim, d_model)
+                      if input_dim != d_model else nn.Identity())
+        self.seeds = nn.Parameter(torch.randn(1, n_seeds, d_model))
+        self.blocks = nn.ModuleList([
+            SeedBlock(d_model, n_heads, dropout, self_att) for _ in range(n_blocks)
+        ])
+        self.norm_seeds = nn.LayerNorm(d_model)
+        self.normalize = normalize
+        #self.norm_views = nn.LayerNorm(d_model)
+
+    def forward(self, X):
+        B = X.size(0)
+        views = self.proj(X)
+        seeds = self.seeds.expand(B, -1, -1).clone()
+
+        for block in self.blocks:
+            seeds, views = block(seeds, views)   # co-évolution
+
+        if self.normalize:
+            return self.norm_seeds(seeds)   # (B, n_seeds, d_model)
+        else:
+            return seeds
+        # views finales disponibles si besoin : self.norm_views(views)
+
+
+class QueryBlock(nn.Module):
+    """
+    Un bloc = 
+      - cross-attention query → seeds (query lisent les seeds transformées)
+      - pas de self-attention sur les query
+    """
+
+    def __init__(self, emb_dim=768, n_heads=12, 
+                 n_classes=1000, pretrained_embeddings=None,  dropout=0.1, residual=False, n_blocks=2):
+        super().__init__()
+
+        ## VIEWS
+
+        self.view_norm = nn.LayerNorm(emb_dim)
+        self.cross_v_norm = nn.LayerNorm(emb_dim)
+
+        self.view_self_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.view_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.view_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), nn.Dropout(dropout),
+        )
+
+        ## SEEDS
+
+        self.seed_norm = nn.LayerNorm(emb_dim)
+        # Cross-attention : seeds lisent les vues
+        self.seed_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.seed_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), nn.Dropout(dropout),
+        )
+
+        ## LABELS
+
+        # Norms Pre-LN
+        self.label_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.kv_norm = nn.LayerNorm(emb_dim)   # sur les seeds
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.query_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        # FFN sur le token label après cross-attention
+        self.label_norm_ffn = nn.LayerNorm(emb_dim)
+        
+        self.label_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        ## POS
+
+        # Norms Pre-LN
+        self.pos_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+
+        self.pos_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.pos_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.n_blocks = n_blocks
+
+    def forward(self, views, seeds, l_emb, z, block_idx):
+        # ── 1. Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        v = v + h_views
+        v = v + self.view_ffn(self.view_norm_ffn(v))
+
+        # ── 2. Seeds lisent les vues transformées ─────────────────────
+        s = self.seed_norm(seeds)
+        h_seeds, _ = self.seed_cross_attn(s, self.cross_v_norm(v), self.cross_v_norm(v))
+        s = s + h_seeds 
+        s = s + self.seed_ffn(self.seed_norm_ffn(s))
+
+        l_norm  = self.label_norm(l_emb).unsqueeze(1)                              # norm partagée ✓
+        kv_norm = self.kv_norm(s)
+
+        residual = block_idx == self.n_blocks - 1
+
+        h_label, attn_label = self.query_cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+        if residual:
+            h_label = l_norm + h_label
+            label_out      = h_label + self.label_ffn(self.pos_norm_ffn(h_label))                 # (B, 1, emb_dim)
+        else:
+            label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+
+        z_norm =  self.pos_norm(z).unsqueeze(1)
+        h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
+        if residual:
+            h_pos = z_norm + h_pos
+            pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+        else:
+            pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+
+        return v, s, label_out, pos_out, attn_label, attn_pos
+
+class IterativeSeedTransformerwithQuery(nn.Module):
+    def __init__(self, emb_dim=768,
+                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=False, normalize=False, n_classes=1000):
+        super().__init__()
+
+        self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.pre_norm_z  = nn.LayerNorm(emb_dim)   # sur le token label
+
+        self.pre_label_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.pre_pos_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        # Token label — embedding appris
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+            # Optionnel : geler les embeddings
+            self.label_embedding.weight.requires_grad = False
+        else:
+            self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+        
+        self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
+        self.blocks = nn.ModuleList([
+            QueryBlock(emb_dim, n_heads, pretrained_embeddings=pretrained_embeddings, n_blocks=n_blocks) for _ in range(n_blocks)
+        ])
+        self.normalize = normalize
+        self.norm_seeds = nn.LayerNorm(emb_dim)
+        self.norm_label = nn.LayerNorm(emb_dim)
+        self.norm_pos = nn.LayerNorm(emb_dim)
+
+    def forward(self, views, labels, z):
+        B = views.size(0)
+        seeds = self.seeds.expand(B, -1, -1).clone()
+
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < 0.2
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
+        elif labels is not None:
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
+        
+        l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb))
+        pos = self.pre_pos_ffn(self.pre_norm_z(z))
+
+        for idx_block, block in enumerate(self.blocks):
+            views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)   # co-évolution
+
+        if self.normalize:
+            return self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos), attn_label, attn_pos   # (B, n_seeds, emb_dim)
+        else:
+            return seeds, l_emb, pos, attn_label, attn_pos
+
+
 class DualPredictor(nn.Module):
     def __init__(self, emb_dim=768, hidden_dim=256):
         super().__init__()
@@ -933,101 +1110,3 @@ class AttentionPooling(nn.Module):
         w = torch.softmax(w, dim=1)
         return (w * z * self.inv_temp).sum(dim=1), w # (B, d)
                 
-
-class SeedBlock(nn.Module):
-    """
-    Un bloc = 
-      - self-attention sur les vues (les vues se transforment entre elles)
-      - cross-attention seeds → vues (seeds lisent les vues transformées)
-      - self-attention sur les seeds (seeds se coordonnent)
-    """
-    def __init__(self, d_model, n_heads, dropout=0.1, self_att=False):
-        super().__init__()
-
-        # Self-attention sur les vues
-        self.view_self_attn = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, batch_first=True
-        )
-        self.view_norm1 = nn.LayerNorm(d_model)
-        self.view_ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
-        )
-        self.view_norm2 = nn.LayerNorm(d_model)
-
-        # Cross-attention : seeds lisent les vues
-        self.cross_attn = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, batch_first=True
-        )
-        self.seed_norm1 = nn.LayerNorm(d_model)
-
-        # Self-attention sur les seeds
-        self.self_att = self_att
-        if self_att:
-            self.seed_self_attn = nn.MultiheadAttention(
-                d_model, n_heads, dropout=dropout, batch_first=True
-            )
-            self.seed_norm2 = nn.LayerNorm(d_model)
-
-        self.seed_ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(4 * d_model, d_model), nn.Dropout(dropout),
-        )
-        self.seed_norm3 = nn.LayerNorm(d_model)
-
-
-    def forward(self, seeds, views):
-        # ── 1. Vues se transforment entre elles ──────────────────────
-
-        v = self.view_norm1(views)
-        h_views, _ = self.view_self_attn(v, v, v)
-        views = views + h_views
-        v2 = self.view_norm2(views)
-        views = views + self.view_ffn(v2)
-
-        # ── 2. Seeds lisent les vues transformées ─────────────────────
-        s = self.seed_norm1(seeds)
-        h_seeds, _ = self.cross_attn(s, v2, v2)
-        seeds = seeds + h_seeds 
-
-        # ── 3. Seeds se coordonnent ───────────────────────────────────
-        if self.self_att:
-            s2 = self.seed_norm2(seeds)
-            h_self, _ = self.seed_self_attn(s2, s2, s2)
-            seeds = seeds + h_self
-            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
-        else:
-            seeds = seeds + self.seed_ffn(self.seed_norm3(seeds))
-
-        return seeds, views   # les deux évoluent
-
-
-class IterativeSeedTransformer(nn.Module):
-    def __init__(self, input_dim=768, d_model=768,
-                 n_heads=12, n_seeds=4, n_blocks=4, dropout=0.1, self_att=False, normalize=False):
-        super().__init__()
-        self.proj  = (nn.Linear(input_dim, d_model)
-                      if input_dim != d_model else nn.Identity())
-        self.seeds = nn.Parameter(torch.randn(1, n_seeds, d_model))
-        self.blocks = nn.ModuleList([
-            SeedBlock(d_model, n_heads, dropout, self_att) for _ in range(n_blocks)
-        ])
-        self.norm_seeds = nn.LayerNorm(d_model)
-        self.normalize = normalize
-        #self.norm_views = nn.LayerNorm(d_model)
-
-    def forward(self, X):
-        B = X.size(0)
-        views = self.proj(X)
-        seeds = self.seeds.expand(B, -1, -1).clone()
-
-        for block in self.blocks:
-            seeds, views = block(seeds, views)   # co-évolution
-
-        if self.normalize:
-            return self.norm_seeds(seeds)   # (B, n_seeds, d_model)
-        else:
-            return seeds
-        # views finales disponibles si besoin : self.norm_views(views)

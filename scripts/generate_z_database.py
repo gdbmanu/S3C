@@ -234,8 +234,8 @@ def generate_embeddings(model, split, dataset_raw, output_dir,
 if __name__ == "__main__":
     # charger modèle
 
-    for split, dataset_raw in [#("train", train_dataset_raw),
-                               ("val",   val_dataset_raw),
+    for split, dataset_raw in [("train", train_dataset_raw),
+                               #("val",   val_dataset_raw),
                                ]:
         generate_embeddings(
             model           = model,       # FoveatedMultiViT déjà chargé
