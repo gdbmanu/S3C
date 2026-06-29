@@ -843,7 +843,7 @@ class QueryBlock(nn.Module):
 
 class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
-                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=False, normalize=False, n_classes=1000):
+                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, normalize=False, n_classes=1000, frozen_emb = True):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
@@ -865,15 +865,16 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Token label — embedding appris
+        # Token label — embedding appris        
         if pretrained_embeddings is not None:
             n_classes, label_emb_dim = pretrained_embeddings.shape
             self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
             self.label_embedding.weight.data.copy_(pretrained_embeddings)
-            # Optionnel : geler les embeddings
-            self.label_embedding.weight.requires_grad = False
         else:
             self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        # Optionnel : geler les embeddings  
+        if frozen_emb:
+            self.label_embedding.weight.requires_grad = False
         self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
         
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
@@ -906,9 +907,9 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)   # co-évolution
 
         if self.normalize:
-            return self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos), attn_label, attn_pos   # (B, n_seeds, emb_dim)
+            return self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)   # (B, n_seeds + 2, emb_dim)
         else:
-            return seeds, l_emb, pos, attn_label, attn_pos
+            return seeds, l_emb, pos
 
 
 class DualPredictor(nn.Module):

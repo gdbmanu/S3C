@@ -26,10 +26,10 @@ import clip
 from torchvision.models import ResNet50_Weights
 
 
-from s3c.models.heads import IterativeSeedTransformer, AttentionPooling #FovealSetTransformer
+from s3c.models.heads import IterativeSeedTransformerwithQuery, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor, TransformerLabelHead, TransformerPosPredictor, TransformerMixedHead
+from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor
 
 import timm
 
@@ -66,7 +66,7 @@ n_uplet_teacher = 5
 n_student_draws = 4
 n_teacher_draws = 3
 
-orig = True
+orig = False
 grid = False
 curriculum = False
 
@@ -100,17 +100,8 @@ test3 = False # no sample diversity
 strict_global_step = False
 cross_integration = True # cross_draws_integration
 
-mixed = True
-if not mixed:
-    abmil_pos = True
-    trans_pos = False
-
-    abmil_label = False
-    trans_label = True
-    if trans_label:
-        softmax = False
-else:
-    residual = True
+abmil_pos = True
+abmil_label = False
 
 suffix = ""
 if supervised : 
@@ -147,22 +138,13 @@ if grid :
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
-if not mixed:
-    if abmil_pos : suffix = suffix + "_APOS2"
-    if trans_pos : suffix = suffix + "_TRANSPOS"
-    if abmil_label : suffix = suffix + "_ALAB2"
-    if trans_label : 
-        if softmax:
-            suffix = suffix + "_SOFT"
-        suffix = suffix + "_TRANSLAB"
-else: 
-    suffix = suffix + "_MIXED"
-    if residual:
-        suffix = suffix + "_RES"
+    
+if abmil_pos : suffix = suffix + "_APOS2"
+if abmil_label : suffix = suffix + "_ALAB2"
 
 if orig: suffix = suffix + "_ORIG"
 
-save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_IST{k}+ABMIL_semi_z_lam{lam}_mu_{mu}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_space"
+save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_ISTQ_{k}_semi_z_lam{lam}_mu_{mu}_sab{n_sab}_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_space"
 
 # Monter le dossier distant
 local=True
@@ -217,71 +199,47 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-ist_transformer = IterativeSeedTransformer(input_dim=embed_dim, d_model=embed_dim,
-                 n_heads=n_heads, n_seeds=k, n_blocks=n_sab, self_att=self_att)
+classes = ResNet50_Weights.DEFAULT.meta['categories']
+print(len(classes))      # 1000
+print(classes[0])        # 'tench'
+print(classes[999])      # 'toilet tissue'
+# Pour CLIP
+texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
+model, _ = clip.load("ViT-L/14")
+model.eval().cuda()
+with torch.no_grad():
+    label_embeddings = model.encode_text(texts)        # (1000, 768)
+linear_head = TransformerLabelHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, softmax=softmax)
+# Effacer le modèle CLIP après utilisation
+del model
+torch.cuda.empty_cache()
+ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=label_embeddings)
 
 
 draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 
-if not mixed:
 
-    if abmil_pos:
-        pos_predictor = ABMILPosPredictor(embed_dim, k)
-    elif trans_pos:
-        pos_predictor = TransformerPosPredictor(emb_dim=embed_dim, n_heads=n_heads)
-    else:
-        pos_predictor = PosPredictor(embed_dim, k)
-
-    # LINEAR PROBE
-
-    if abmil_label:
-        linear_head = ABMILLabelPredictor(emb_dim=embed_dim, k=k)
-    elif trans_label:
-        classes = ResNet50_Weights.DEFAULT.meta['categories']
-        print(len(classes))      # 1000
-        print(classes[0])        # 'tench'
-        print(classes[999])      # 'toilet tissue'
-        # Pour CLIP
-        texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
-        model, _ = clip.load("ViT-L/14")
-        model.eval().cuda()
-        with torch.no_grad():
-            label_embeddings = model.encode_text(texts)        # (1000, 768)
-        linear_head = TransformerLabelHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, softmax=softmax)
-        # Effacer le modèle CLIP après utilisation
-        del model
-        torch.cuda.empty_cache()
-    else:
-        linear_head = nn.Sequential(
-                        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
-                        nn.LayerNorm(embed_dim),                  # norm par seed ✓
-                        nn.Flatten(1),    
-                        nn.Linear(k * embed_dim, 1000),
-                    )
+if abmil_pos:
+    pos_predictor = ABMILPosPredictor(embed_dim, k)
 else:
-    if supervised:
-        pos_predictor = nn.Identity()
-        classes = ResNet50_Weights.DEFAULT.meta['categories']
-        print(len(classes))      # 1000
-        print(classes[0])        # 'tench'
-        print(classes[999])      # 'toilet tissue'
-        # Pour CLIP
-        texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
-        model, _ = clip.load("ViT-L/14")
-        model.eval().cuda()
-        with torch.no_grad():
-            label_embeddings = model.encode_text(texts)        # (1000, 768)
-        del model
-        torch.cuda.empty_cache()
-        linear_head = TransformerMixedHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, residual=residual)
-    else:
-        pos_predictor = TransformerMixedHead(emb_dim=embed_dim, n_heads=n_heads, residual=residual)
-        linear_head = nn.Sequential(
-                        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
-                        nn.LayerNorm(embed_dim),                  # norm par seed ✓
-                        nn.Flatten(1),    
-                        nn.Linear(k * embed_dim, 1000),
-                    )
+    pos_predictor = PosPredictor(embed_dim, k)
+
+# LINEAR PROBE
+
+if abmil_label:
+    linear_head = ABMILLabelPredictor(emb_dim=embed_dim, k=k)
+else:
+    '''linear_head = nn.Sequential(
+                    nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+                    nn.LayerNorm(embed_dim),                  # norm par seed ✓
+                    nn.Flatten(1),    
+                    nn.Linear(k * embed_dim, 1000),
+                )'''
+    linear_head = nn.Sequential(
+                    nn.LayerNorm(embed_dim),                  
+                    nn.Linear(embed_dim, 1000),
+                )
+
 
 seeds_mlp = nn.Sequential(
     nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
@@ -454,7 +412,7 @@ history = {"epoch": [], "batch": [], "loss": [],
 for j in range(k):
     history[f"classif {j}"] = []
 history[f"classif"] = []
-if supervised and (mixed or trans_label):
+if supervised:
     history[f"sup classif"] = []
 
 os.makedirs(save_dir, exist_ok=True)
@@ -494,26 +452,30 @@ for epoch in range(train_epochs):
         z_probe = features[torch.arange(batch_size), idx_probe, :].to(device)
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            if n_student_draws > 0:
-                output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
+            if supervised:
+                if n_student_draws > 0:
+                    output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, z_probe) for i in range(n_student_draws)], dim=1)
+                output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
+            else:
+                if n_student_draws > 0:
+                    output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
+                output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
+
             #
             if cross_integration:
-                if k == 1:
-                    centers, _ = draws_attention(output_t.squeeze(dim=2)) 
-                else:
-                    center_seeds = []
-                    for seed_idx in range(k):
-                        # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                        z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
-                        center_seeds.append(z)
-                    centers = torch.stack(center_seeds, dim=1)
+                center_seeds = []
+                for seed_idx in range(k+2):
+                    # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                    z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
+                    center_seeds.append(z)
+                centers = torch.stack(center_seeds, dim=1)
             else:
                 centers = output_t.mean(dim=1)
 
-            
-
-            z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
+            seed_centers = centers[:,:k,:]
+            z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+            l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
+            pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
             loss_sigreg = torch.tensor(0.).to(device)
@@ -522,7 +484,7 @@ for epoch in range(train_epochs):
                 if k>1:
                     for j in range(k): # seeds loop
                         for i in range(n_student_draws):           
-                            loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                            loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
                         if not strict_global_step:
                             global_step += 1 # !!! TEST !!!
                 else:
@@ -531,7 +493,7 @@ for epoch in range(train_epochs):
             if n_student_draws > 0:
                 z_draws = []
                 for i in range(n_student_draws):
-                    z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
+                    z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
                     if stop_gradient:
                         loss_jepa += mse(z_draw, z_center.detach())
                     else:
@@ -556,39 +518,33 @@ for epoch in range(train_epochs):
 
             if supervised:
                 #output_t_head = linear_head(z_center)
-                if not mixed:
-                    if abmil_pos or trans_pos:
-                        pos_pred, _ = pos_predictor(centers, z_probe)
-                    else:
-                        pos_pred = pos_predictor(centers, z_probe)     
-                    if abmil_label or trans_label:
-                        output_t_head, _ = linear_head(centers, labels)
-                    else:
-                        output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
+                if abmil_pos:
+                    pos_pred, _ = pos_predictor(seed_centers, pos_center)
                 else:
-                    output_t_head, pos_pred, _ = linear_head(centers, z_probe, labels)
+                    pos_pred = pos_predictor(seed_centers, pos_center)     
+                if abmil_label:
+                    output_t_head, _ = linear_head(seed_centers, l_emb_center)
+                else:
+                    output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
+                
                 if pure:
                     loss_label = loss = criterion(output_t_head, labels)
                 else:
                     pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                     loss_pos = F.mse_loss(pos_pred, pos_target)
-                    if mixed:
-                        loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + 30 * loss_pos + criterion(output_t_head, labels)
-                    else:
-                        loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
+                    
+                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                if not mixed:
-                    if abmil_pos or trans_pos:
-                        pos_pred, _ = pos_predictor(centers, z_probe)
-                    else:
-                        pos_pred = pos_predictor(centers, z_probe)     
+                if abmil_pos:
+                    pos_pred, _ = pos_predictor(seed_centers, pos_center)
                 else:
-                    _, pos_pred, _ = pos_predictor(centers, z_probe)
+                    pos_pred = pos_predictor(seed_centers, pos_center)     
+                
                 pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                 loss_pos = F.mse_loss(pos_pred, pos_target)
 
-                output_t_head = linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                output_t_head = output_t_head = linear_head(l_emb_center) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
 
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
@@ -640,7 +596,7 @@ for epoch in range(train_epochs):
             seeds_correct = [0.0 for j in range(k)]
             val_iter = iter(val_loader)
 
-            if mixed or trans_label:
+            if supervised:
                 correct_sup = 0.0
 
             with torch.no_grad():
@@ -672,28 +628,41 @@ for epoch in range(train_epochs):
 
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                         if n_student_draws > 0:
-                            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:]) for i in range(n_student_draws)])
-                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:]) for i in range(n_teacher_draws)], dim=1)
-                        #
+                            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
+                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
+                        if supervised:
+                            output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
+
                         mem_w = []
+                        mem_w_sup = []
                         if cross_integration:
-                            if k == 1:
-                                centers, w = draws_attention(output_t.squeeze(dim=2)) 
-                                mem_w = w
-                            else:
-                                center_seeds = []
-                                for seed_idx in range(k):
-                                    # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                                    z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
-                                    mem_w += [w]
-                                    center_seeds.append(z)
-                                centers = torch.stack(center_seeds, dim=1)
+                            center_seeds = []
+                            center_seeds_sup = []
+                            for seed_idx in range(k+2):
+                                # Vues de ce seed à travers tous les draws : (B, n_draws, d)
+                                z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
+                                z_sup, w_sup = draws_attention(output_t_sup[:, :, seed_idx, :])           # (B, d)
+                                mem_w += [w]
+                                mem_w_sup += [w]
+                                center_seeds.append(z)
+                                center_seeds_sup.append(z_sup)
+                            centers = torch.stack(center_seeds, dim=1)
+                            centers_sup = torch.stack(center_seeds_sup, dim=1)
                         else:
-                            centers = output_t.mean(dim=1)     
+                            centers = output_t.mean(dim=1)
+                            centers_sup = output_t_sup.mean(dim=1)
 
-                        
 
-                        z_center = seeds_mlp(centers.view(batch_size, k*embed_dim))
+                        seed_centers = centers[:,:k,:]
+                        z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+                        l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
+                        pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
+
+                        if supervised:
+                            seed_centers_sup = centers_sup[:,:k,:]
+                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k*embed_dim))
+                            l_emb_center_sup = centers_sup[:,k,:].view(batch_size, embed_dim)
+                            pos_center_sup = centers_sup[:,k+1,:].view(batch_size, embed_dim)
 
                         loss_jepa = torch.tensor(0.).to(device)
                         loss_sigreg = torch.tensor(0.).to(device)
@@ -702,15 +671,16 @@ for epoch in range(train_epochs):
                             if k>1:
                                 for j in range(k): # seeds loop
                                     for i in range(n_student_draws):           
-                                        loss_sigreg += sigreg(output_s[i,:,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                                        loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
                                     if not strict_global_step:
                                         global_step += 1 # !!! TEST !!!
                             else:
                                 assert False # not consistent
 
                         if n_student_draws > 0:
+                            z_draws = []
                             for i in range(n_student_draws):
-                                z_draw = seeds_mlp(output_s[i].view(batch_size, k*embed_dim))
+                                z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
                                 if stop_gradient:
                                     loss_jepa += mse(z_draw, z_center.detach())
                                 else:
@@ -725,48 +695,46 @@ for epoch in range(train_epochs):
                             global_step += 1
 
 
-                        #loss_sigreg += sigreg(centers.view(batch_size, k*embed_dim).float(), global_step)
-                        #global_step += 1
-
                         if k>1:
+                            loss_seeds = 0
                             for j in range(k):
                                 output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
-                                preds = output_t_seed.argmax(dim=1)
-                                seeds_correct[j] += (preds == labels).sum().item()
+                                loss_seeds += criterion(output_t_seed, labels)                        
 
-                        #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-
-                        #output_t_head = linear_head(z_center)
-                        if not mixed:
-                            if abmil_pos or trans_pos:
-                                pos_pred, w_pos = pos_predictor(centers, z_probe)
+                        if supervised:
+                            #output_t_head = linear_head(z_center)
+                            if abmil_pos:
+                                pos_pred, _ = pos_predictor(seed_centers, pos_center)
+                                pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
                             else:
-                                pos_pred = pos_predictor(centers, z_probe)     
-                            if abmil_label or trans_label:
-                                output_t_head, w_lab = linear_head(centers)
-                                if trans_label:
-                                    output_t_head_sup, w_lab_sup = linear_head(centers, labels)
+                                pos_pred = pos_predictor(seed_centers, pos_center)     
+                                pos_pred_sup = pos_predictor(seed_centers_sup, pos_center_sup)     
+                            if abmil_label:
+                                output_t_head, _ = linear_head(seed_centers, l_emb_center)
+                                output_t_head_sup, _ = linear_head(seed_centers_sup, l_emb_center_sup)
                             else:
-                                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
+                                output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
+                                output_t_head_sup = linear_head(l_emb_center_sup) #seed_centers.view(batch_size, k * embed_dim))
+                            
+                            
+                            pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
+                            loss_pos = F.mse_loss(pos_pred, pos_target)
+                            
+                            loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
                         else:
-                            if supervised:
-                                output_t_head, pos_pred, w = linear_head(centers, z_probe)
-                                output_t_head_sup, _, w_sup = linear_head(centers, z_probe, labels)
-                                w_lab = w[:, 0, :]
-                                w_lab_sup = w_sup[:, 0, :]
-                                w_pos = w[:, 1, :]
+                            #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                            if abmil_pos:
+                                pos_pred, _ = pos_predictor(seed_centers, pos_center)
                             else:
-                                _, pos_pred, w = pos_predictor(centers, z_probe)
-                                w_pos = w[:, 1, :]
-                                output_t_head = linear_head(centers.view(batch_size, k * embed_dim))
-                        
-                        pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
-                        loss_pos = F.mse_loss(pos_pred, pos_target)
+                                pos_pred = pos_predictor(seed_centers, pos_center)     
+                            
+                            pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
+                            loss_pos = F.mse_loss(pos_pred, pos_target)
 
-                        loss_label = criterion(output_t_head, labels)
-                        
-                        loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
+                            output_t_head = output_t_head = linear_head(l_emb_center) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                            loss_label = criterion(output_t_head, labels)
 
+                            loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
 
                     if n_val == 0:
                         ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
@@ -779,12 +747,11 @@ for epoch in range(train_epochs):
                                 for i in range(k):
                                     print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
                                 #print("global", w[0,...].detach().float().cpu().numpy())
-                                if mixed or abmil_pos or trans_pos:
+                                '''if abmil_pos:
                                     print("pos seed mixture:", w_pos[0,...].detach().float().cpu().numpy().flatten())
-                                if supervised and (mixed or abmil_label or trans_label):
+                                if supervised:
                                     print("label seed mixture:", w_lab[0,...].detach().float().cpu().numpy().flatten())
-                                    if mixed or trans_label:
-                                        print("oracle label seed mixture:", w_lab_sup[0,...].detach().float().cpu().numpy().flatten())
+                                    print("oracle label seed mixture:", w_lab_sup[0,...].detach().float().cpu().numpy().flatten())'''
                             else:
                                 print(w[0,...].detach().float().cpu().numpy())
                     
@@ -797,14 +764,14 @@ for epoch in range(train_epochs):
                     running_label += loss_label.item()
                     running_pos += loss_pos.item()
 
-                    if supervised and (mixed or trans_label):
+                    if supervised :
                         preds_sup = output_t_head_sup.argmax(dim=1)
                         correct_sup += (preds_sup == labels).sum().item()
 
                     total += labels.size(0)
 
             print(f"Global accuracy: {100 * correct / total:.2f}%")
-            if supervised and (mixed or trans_label):
+            if supervised:
                 print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
             for j in range(k):
                 print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
@@ -812,7 +779,7 @@ for epoch in range(train_epochs):
             history["classif"].append(100 * correct / total)
             for j in range(k):
                 history[f"classif {j}"].append(100 * seeds_correct[j] / total)
-            if supervised and (mixed or trans_label):
+            if supervised:
                 history[f"sup classif"].append(100 * correct_sup / total)
             history["loss_sigreg"].append(running_sigreg / total)
             history["loss_jepa"].append(running_jepa / total)
