@@ -168,16 +168,6 @@ class ABMILPosPredictor(nn.Module):
         return self.head(out), w
 
 
-        '''for i in range(self.k):
-            s_i = self.norm_s[i](s[:, i, :])      # (B, emb_dim)
-            sz_i = torch.cat([s_i, z], dim=-1)    # (B, 2*emb_dim)
-            hs.append(self.combine[i](sz_i))      # (B, hidden_dim)
-        hs = torch.stack(hs, dim=1)               # (B, k, hidden_dim)
-        w = self.attn(hs)                         # (B, k, 1)
-        w = torch.softmax(w, dim=1)
-        h = (w * hs).sum(dim=1)              # (B, hidden_dim)
-        return self.head(h)                  # (B, out_dim)'''
-
 class TransformerPosPredictor(nn.Module):
     """
     Prédit la position (x, y) d'une vue z à partir des k seeds.
@@ -514,115 +504,6 @@ class TransformerMixedHead(nn.Module):
                 self.pos_head(pos_out_norm),
                 torch.cat([attn_label, attn_pos], dim=1))   
         
-        
-
-    
-class ABMILPosPredictor(nn.Module):
-    """
-    Prédit la position (x, y) d'une vue z à partir des k seeds
-    et de l'embedding DINO de cette vue.
-
-    Poids et LayerNorm DISTINCTS par seed.
-
-    s : (B, k, emb_dim)  — seeds
-    z : (B, emb_dim)     — embedding DINO de la vue à localiser
-
-    Logique ABMIL dans la couche intermédiaire
-    """
-    def __init__(self, emb_dim=768, k=1, hidden_dim=512, out_dim=2):
-        super().__init__()
-        self.k = k
-
-        # LayerNorm distinct par seed
-        self.norm_s = nn.ModuleList([
-            nn.LayerNorm(emb_dim) for _ in range(k)
-        ])
-        # LayerNorm de z 
-        self.norm_z = nn.LayerNorm(emb_dim) 
-
-        '''self.attn = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
-            nn.Tanh(),
-            nn.Linear(256, 1),
-        )'''
-
-        self.attn = nn.Sequential(
-            nn.Linear(2 * hidden_dim, 256),   # ← 2*emb_dim au lieu de emb_dim
-            nn.Tanh(),
-            nn.Linear(256, 1),
-        )
-
-        # Combinaison (s_i, z) → h_i — poids distincts par seed
-        self.combine = nn.Sequential(
-                nn.Linear(2 * hidden_dim, 2 * hidden_dim),
-                nn.ReLU(),
-                nn.Linear(2 * hidden_dim, hidden_dim),
-                nn.ReLU(),
-            )
-
-        self.seed_transform = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(emb_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-            )
-            for _ in range(k)
-        ])
-
-        self.z_transform = nn.Sequential(
-                nn.Linear(emb_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-            )
-
-        # MLP final sur la concaténation h1...hk
-        '''self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, out_dim),
-        )'''
-
-        self.head = nn.Linear(hidden_dim, out_dim)
-        
-
-    def forward(self, s, z):
-        # s : (B, k, emb_dim)
-        # z : (B, emb_dim)
-
-        if s.dim() == 2:
-            s = s.unsqueeze(1)   # (B, emb_dim) → (B, 1, emb_dim)
-
-        z_norm = self.z_transform(self.norm_z(z) )
-
-        s_norm = torch.stack([
-                                self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
-                            ], dim=1)   # (B, k, emb_dim)
-        
-        # Concaténer z à chaque seed pour le calcul des scores
-        z_exp = z_norm.unsqueeze(1).expand(-1, self.k, -1) # (B, k, emb_dim)
-        sz = torch.cat([s_norm, z_exp], dim=-1)            # (B, k, 2*emb_dim)
-
-        # ABMIL conditionné sur z
-        w = self.attn(sz)                                  # (B, k, 1)
-        w = torch.softmax(w, dim=1)
-        h = (w * s_norm).sum(dim=1)
-
-        hz = torch.cat([h, z_norm], dim=-1)
-        hz = self.combine(hz)
-        return self.head(hz) 
-
-
-        '''for i in range(self.k):
-            s_i = self.norm_s[i](s[:, i, :])      # (B, emb_dim)
-            sz_i = torch.cat([s_i, z], dim=-1)    # (B, 2*emb_dim)
-            hs.append(self.combine[i](sz_i))      # (B, hidden_dim)
-        hs = torch.stack(hs, dim=1)               # (B, k, hidden_dim)
-        w = self.attn(hs)                         # (B, k, 1)
-        w = torch.softmax(w, dim=1)
-        h = (w * hs).sum(dim=1)              # (B, hidden_dim)
-        return self.head(h)                  # (B, out_dim)'''
-    
-
 
 class SeedBlock(nn.Module):
     """
@@ -731,7 +612,7 @@ class QueryBlock(nn.Module):
     """
 
     def __init__(self, emb_dim=768, n_heads=12, 
-                 n_classes=1000, pretrained_embeddings=None,  dropout=0.1, residual=False, n_blocks=2):
+                 n_classes=1000,  dropout=0.1, residual=False, l_emb_detach=False, n_blocks=2):
         super().__init__()
 
         ## VIEWS
@@ -804,6 +685,8 @@ class QueryBlock(nn.Module):
         )
 
         self.n_blocks = n_blocks
+        self.residual = residual
+        self.l_emb_detach = l_emb_detach
 
     def forward(self, views, seeds, l_emb, z, block_idx):
         # ── 1. Vues se transforment entre elles ──────────────────────
@@ -819,20 +702,27 @@ class QueryBlock(nn.Module):
         s = s + h_seeds 
         s = s + self.seed_ffn(self.seed_norm_ffn(s))
 
-        l_norm  = self.label_norm(l_emb).unsqueeze(1)                              # norm partagée ✓
+        l_norm  = self.label_norm(l_emb)
         kv_norm = self.kv_norm(s)
 
-        residual = block_idx == self.n_blocks - 1
-
-        h_label, attn_label = self.query_cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+        if self.residual:
+            residual = block_idx < self.n_blocks - 1
+        else:
+            residual = False
+        if self.l_emb_detach:
+            h_label, attn_label = self.query_cross_attn(l_norm.detach(), kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+        else:
+            h_label, attn_label = self.query_cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+        
         if residual:
             h_label = l_norm + h_label
             label_out      = h_label + self.label_ffn(self.pos_norm_ffn(h_label))                 # (B, 1, emb_dim)
         else:
             label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
-        z_norm =  self.pos_norm(z).unsqueeze(1)
+        z_norm =  self.pos_norm(z)
         h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
+        
         if residual:
             h_pos = z_norm + h_pos
             pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
@@ -843,7 +733,9 @@ class QueryBlock(nn.Module):
 
 class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
-                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, normalize=False, n_classes=1000, frozen_emb = True):
+                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 normalize=False, n_classes=1000, frozen_emb = True, residual=False, l_emb_detach=False,
+                 label_smoothing=0.1):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
@@ -854,7 +746,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(4 * emb_dim, emb_dim),
-            nn.Dropout(dropout),
+            nn.Dropout(label_smoothing), # increase label embedding entropy
         )
 
         self.pre_pos_ffn = nn.Sequential(
@@ -879,7 +771,8 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
         self.blocks = nn.ModuleList([
-            QueryBlock(emb_dim, n_heads, pretrained_embeddings=pretrained_embeddings, n_blocks=n_blocks) for _ in range(n_blocks)
+            QueryBlock(emb_dim, n_heads, n_blocks=n_blocks, 
+                       residual=residual, l_emb_detach=l_emb_detach) for _ in range(n_blocks)
         ])
         self.normalize = normalize
         self.norm_seeds = nn.LayerNorm(emb_dim)
@@ -891,7 +784,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         seeds = self.seeds.expand(B, -1, -1).clone()
 
         if labels is not None and self.training:
-            mask   = torch.rand(B, device=views.device) < 0.2
+            mask   = torch.rand(B, device=views.device) < 0.8
             l_emb  = self.label_embedding(labels)  # (B, emb_dim)
             cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
             l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
@@ -900,16 +793,16 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         else:
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
         
-        l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb))
-        pos = self.pre_pos_ffn(self.pre_norm_z(z))
+        l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb)).unsqueeze(1)
+        pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
 
         for idx_block, block in enumerate(self.blocks):
             views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)   # co-évolution
 
         if self.normalize:
-            return self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)   # (B, n_seeds + 2, emb_dim)
+            return torch.cat([self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)], dim=1) #, attn_label, attn_pos   # (B, n_seeds, emb_dim)
         else:
-            return seeds, l_emb, pos
+            return torch.cat([seeds, l_emb, pos], dim=1) #seeds, l_emb, pos, attn_label, attn_pos
 
 
 class DualPredictor(nn.Module):

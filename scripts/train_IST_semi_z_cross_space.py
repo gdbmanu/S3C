@@ -66,7 +66,7 @@ n_uplet_teacher = 5
 n_student_draws = 4
 n_teacher_draws = 3
 
-orig = True
+orig = False
 grid = False
 curriculum = False
 
@@ -110,7 +110,7 @@ if not mixed:
     if trans_label:
         softmax = False
 else:
-    residual = True
+    residual = False
 
 suffix = ""
 if supervised : 

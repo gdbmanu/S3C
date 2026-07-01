@@ -29,7 +29,7 @@ from torchvision.models import ResNet50_Weights
 from s3c.models.heads import IterativeSeedTransformerwithQuery, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import PosPredictor, ABMILPosPredictor, ABMILLabelPredictor
+from s3c.models.heads import  ABMILPosPredictor, ABMILLabelPredictor, PosPredictor
 
 import timm
 
@@ -100,6 +100,10 @@ test3 = False # no sample diversity
 strict_global_step = False
 cross_integration = True # cross_draws_integration
 
+residual = True
+l_emb_detach = True
+label_smoothing = 0.8
+
 abmil_pos = True
 abmil_label = False
 
@@ -138,6 +142,13 @@ if grid :
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
+
+if residual:
+    suffix = suffix + "_RES"
+if l_emb_detach:
+    suffix = suffix + "_DETACH"
+if label_smoothing != 0.:
+    suffix = suffix + f"_SMOOTH{label_smoothing}"
     
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
@@ -209,11 +220,11 @@ model, _ = clip.load("ViT-L/14")
 model.eval().cuda()
 with torch.no_grad():
     label_embeddings = model.encode_text(texts)        # (1000, 768)
-linear_head = TransformerLabelHead(emb_dim=embed_dim, n_heads=n_heads, pretrained_embeddings=label_embeddings, softmax=softmax)
 # Effacer le modèle CLIP après utilisation
 del model
 torch.cuda.empty_cache()
-ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=label_embeddings)
+ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=label_embeddings,
+                                                    residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
 
 
 draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
@@ -240,16 +251,20 @@ else:
                     nn.Linear(embed_dim, 1000),
                 )
 
+if supervised:
+    k_prim = k
+else:
+    k_prim = k+1
 
 seeds_mlp = nn.Sequential(
-    nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+    nn.Unflatten(1, (k_prim, embed_dim)),          # (B, k*d) → (B, k, d)
     nn.LayerNorm(embed_dim),                  # norm par seed ✓
     nn.Flatten(1),                            # (B, k, d) → (B, k*d)
-    nn.Linear(k * embed_dim, k * embed_dim),
+    nn.Linear(k_prim * embed_dim, k_prim * embed_dim),
     nn.ReLU(),
-    nn.Linear(k * embed_dim, k * embed_dim),
+    nn.Linear(k_prim * embed_dim, k_prim * embed_dim),
     nn.ReLU(),
-    nn.Linear(k * embed_dim, bottleneck_dim),
+    nn.Linear(k_prim * embed_dim, bottleneck_dim),
 )
 
 if k>1:                                     # cross-draws integration (seed diversity)
@@ -382,7 +397,10 @@ if k > 1:
     )
 
 #scaler = torch.cuda.amp.GradScaler()
-criterion = nn.CrossEntropyLoss()
+if label_smoothing:
+    criterion = nn.CrossEntropyLoss(label_smoothing = label_smoothing)
+else:
+    criterion = nn.CrossEntropyLoss()
 mse = nn.MSELoss()
 
 #sigreg = SIGReg()
@@ -462,6 +480,7 @@ for epoch in range(train_epochs):
                 output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
 
             #
+
             if cross_integration:
                 center_seeds = []
                 for seed_idx in range(k+2):
@@ -472,8 +491,8 @@ for epoch in range(train_epochs):
             else:
                 centers = output_t.mean(dim=1)
 
-            seed_centers = centers[:,:k,:]
-            z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+            seed_centers = centers[:,:k_prim,:]
+            z_center = seeds_mlp(seed_centers.view(batch_size, k_prim*embed_dim))
             l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
             pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
 
@@ -482,7 +501,7 @@ for epoch in range(train_epochs):
 
             if test and n_student_draws > 0:
                 if k>1:
-                    for j in range(k): # seeds loop
+                    for j in range(k_prim): # seeds loop
                         for i in range(n_student_draws):           
                             loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
                         if not strict_global_step:
@@ -493,7 +512,7 @@ for epoch in range(train_epochs):
             if n_student_draws > 0:
                 z_draws = []
                 for i in range(n_student_draws):
-                    z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
+                    z_draw = seeds_mlp(output_s[:,i,:k_prim,:].view(batch_size, k_prim*embed_dim))
                     if stop_gradient:
                         loss_jepa += mse(z_draw, z_center.detach())
                     else:
@@ -519,11 +538,11 @@ for epoch in range(train_epochs):
             if supervised:
                 #output_t_head = linear_head(z_center)
                 if abmil_pos:
-                    pos_pred, _ = pos_predictor(seed_centers, pos_center)
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                 else:
-                    pos_pred = pos_predictor(seed_centers, pos_center)     
+                    pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
                 if abmil_label:
-                    output_t_head, _ = linear_head(seed_centers, l_emb_center)
+                    output_t_head, _ = linear_head(seed_centers[:,:k,:], l_emb_center)
                 else:
                     output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
                 
@@ -537,14 +556,14 @@ for epoch in range(train_epochs):
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 if abmil_pos:
-                    pos_pred, _ = pos_predictor(seed_centers, pos_center)
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                 else:
-                    pos_pred = pos_predictor(seed_centers, pos_center)     
+                    pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
                 
                 pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                 loss_pos = F.mse_loss(pos_pred, pos_target)
 
-                output_t_head = output_t_head = linear_head(l_emb_center) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                output_t_head = linear_head(l_emb_center.detach()) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
 
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
@@ -641,26 +660,28 @@ for epoch in range(train_epochs):
                             for seed_idx in range(k+2):
                                 # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                                 z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
-                                z_sup, w_sup = draws_attention(output_t_sup[:, :, seed_idx, :])           # (B, d)
                                 mem_w += [w]
-                                mem_w_sup += [w]
                                 center_seeds.append(z)
-                                center_seeds_sup.append(z_sup)
+                                if supervised:
+                                    z_sup, w_sup = draws_attention(output_t_sup[:, :, seed_idx, :])           # (B, d)
+                                    mem_w_sup += [w_sup]
+                                    center_seeds_sup.append(z_sup)
                             centers = torch.stack(center_seeds, dim=1)
-                            centers_sup = torch.stack(center_seeds_sup, dim=1)
+                            if supervised:
+                                centers_sup = torch.stack(center_seeds_sup, dim=1)
                         else:
                             centers = output_t.mean(dim=1)
                             centers_sup = output_t_sup.mean(dim=1)
 
 
-                        seed_centers = centers[:,:k,:]
-                        z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+                        seed_centers = centers[:,:k_prim:]
+                        z_center = seeds_mlp(seed_centers.view(batch_size, k_prim*embed_dim))
                         l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
                         pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
 
                         if supervised:
-                            seed_centers_sup = centers_sup[:,:k,:]
-                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k*embed_dim))
+                            seed_centers_sup = centers_sup[:,:k_prim,:]
+                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k_prim*embed_dim))
                             l_emb_center_sup = centers_sup[:,k,:].view(batch_size, embed_dim)
                             pos_center_sup = centers_sup[:,k+1,:].view(batch_size, embed_dim)
 
@@ -669,7 +690,7 @@ for epoch in range(train_epochs):
 
                         if test and n_student_draws > 0:
                             if k>1:
-                                for j in range(k): # seeds loop
+                                for j in range(k_prim): # seeds loop
                                     for i in range(n_student_draws):           
                                         loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
                                     if not strict_global_step:
@@ -680,7 +701,7 @@ for epoch in range(train_epochs):
                         if n_student_draws > 0:
                             z_draws = []
                             for i in range(n_student_draws):
-                                z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
+                                z_draw = seeds_mlp(output_s[:,i,:k_prim,:].view(batch_size, k_prim*embed_dim))
                                 if stop_gradient:
                                     loss_jepa += mse(z_draw, z_center.detach())
                                 else:
@@ -699,18 +720,19 @@ for epoch in range(train_epochs):
                             loss_seeds = 0
                             for j in range(k):
                                 output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
-                                loss_seeds += criterion(output_t_seed, labels)                        
+                                preds = output_t_seed.argmax(dim=1) 
+                                seeds_correct[j] += (preds == labels).sum().item()                    
 
                         if supervised:
                             #output_t_head = linear_head(z_center)
                             if abmil_pos:
-                                pos_pred, _ = pos_predictor(seed_centers, pos_center)
+                                pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                                 pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
                             else:
-                                pos_pred = pos_predictor(seed_centers, pos_center)     
+                                pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
                                 pos_pred_sup = pos_predictor(seed_centers_sup, pos_center_sup)     
                             if abmil_label:
-                                output_t_head, _ = linear_head(seed_centers, l_emb_center)
+                                output_t_head, _ = linear_head(seed_centers[:,:k,:], l_emb_center)
                                 output_t_head_sup, _ = linear_head(seed_centers_sup, l_emb_center_sup)
                             else:
                                 output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
@@ -719,14 +741,15 @@ for epoch in range(train_epochs):
                             
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                             loss_pos = F.mse_loss(pos_pred, pos_target)
+                            loss_pos_sup = F.mse_loss(pos_pred_sup, pos_target)
                             
                             loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
                         else:
                             #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                             if abmil_pos:
-                                pos_pred, _ = pos_predictor(seed_centers, pos_center)
+                                pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                             else:
-                                pos_pred = pos_predictor(seed_centers, pos_center)     
+                                pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
                             
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                             loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -740,12 +763,16 @@ for epoch in range(train_epochs):
                         ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                         print(f"ratio sigreg/jepa = {ratio:.2f}")
                         print(f"pos target : ({x_probe[0].item():.2f},{y_probe[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
-                        print(f"avg position error = {np.sqrt(loss_pos.item()):.2f}")
+                        print(f"pos error = {np.sqrt(loss_pos.item()):.2f}")
                         
                         if cross_integration:
                             if k>1:
                                 for i in range(k):
                                     print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
+                                print(f"label", mem_w[k][0,...].detach().float().cpu().numpy().flatten())
+                                if supervised:
+                                    print(f"label_sup", mem_w_sup[k][0,...].detach().float().cpu().numpy().flatten())
+                                print(f"pos", mem_w[k+1][0,...].detach().float().cpu().numpy().flatten())
                                 #print("global", w[0,...].detach().float().cpu().numpy())
                                 '''if abmil_pos:
                                     print("pos seed mixture:", w_pos[0,...].detach().float().cpu().numpy().flatten())
