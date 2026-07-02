@@ -78,7 +78,7 @@ if grid:
     n_teacher_draws = 3
 
 
-train_epochs = 30 #100
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
@@ -348,7 +348,7 @@ if k>1:
 os.makedirs(save_dir, exist_ok=True)
 
 if supervised:
-    if train_epochs == 100:
+    if False: #train_epochs == 100:
         linear_optimizer = torch.optim.AdamW(
             [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
             {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
