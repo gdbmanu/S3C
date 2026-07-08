@@ -14,6 +14,26 @@ from s3c.data.datasets import make_pair_dataloader
 
 from torch.optim.lr_scheduler import LinearLR
 
+import nltk
+nltk.download('wordnet')
+from nltk.corpus import wordnet as wn
+
+
+def get_parent_synset(wnid, level=2):
+    """
+    Remonte de `level` niveaux dans la hiérarchie WordNet.
+    level=1 : parent direct
+    level=2 : grand-parent (ex: 'dog' → 'canine' → 'carnivore')
+    """
+    synset = wn.synset_from_pos_and_offset('n', int(wnid[1:]))
+    for _ in range(level):
+        hypernyms = synset.hypernyms()
+        if not hypernyms:
+            break
+        synset = hypernyms[0]
+    return synset
+
+
 
 def split_backbone_head_params(model):
     backbone = []

@@ -20,6 +20,8 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 from torchvision import datasets
+from torchvision.datasets import ImageNet
+from torchvision.datasets import ImageFolder
 
 import clip
 
@@ -30,6 +32,7 @@ from s3c.models.heads import IterativeSeedTransformerwithQuery, AttentionPooling
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
 from s3c.models.heads import  ABMILPosPredictor, ABMILLabelPredictor, PosPredictor
+from s3c.utils.training import get_parent_synset
 
 import timm
 
@@ -78,7 +81,7 @@ if grid:
     n_teacher_draws = 3
 
 
-train_epochs = 100
+train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
@@ -102,7 +105,9 @@ cross_integration = True # cross_draws_integration
 
 residual = True
 l_emb_detach = True
-label_smoothing = 0.8
+label_smoothing = 0.5
+use_synset_embeddings = True
+index_embeddings = True
 
 abmil_pos = True
 abmil_label = False
@@ -149,6 +154,10 @@ if l_emb_detach:
     suffix = suffix + "_DETACH"
 if label_smoothing != 0.:
     suffix = suffix + f"_SMOOTH{label_smoothing}"
+if index_embeddings:
+    suffix = suffix + "_INDEX"
+if use_synset_embeddings:
+    suffix = suffix + "_SYNSET"
     
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
@@ -210,21 +219,83 @@ val_loader = DataLoader(
         num_workers = num_workers,
     )
 
-classes = ResNet50_Weights.DEFAULT.meta['categories']
-print(len(classes))      # 1000
-print(classes[0])        # 'tench'
-print(classes[999])      # 'toilet tissue'
-# Pour CLIP
-texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
-model, _ = clip.load("ViT-L/14")
-model.eval().cuda()
-with torch.no_grad():
-    label_embeddings = model.encode_text(texts)        # (1000, 768)
-# Effacer le modèle CLIP après utilisation
-del model
-torch.cuda.empty_cache()
-ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=label_embeddings,
-                                                    residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+
+
+if use_synset_embeddings:
+
+    dataset = ImageFolder(root='~/data/Imagenet/val')
+    wnids = list(dataset.class_to_idx.keys())   # ['n01440764', ...]
+    wnids = sorted(wnids)                        # ordre alphabétique = ordre ImageNet standard
+    print(len(wnids))   # 1000
+
+    label_to_parent = {}
+    parent_names    = {}
+
+    synset_level = 3
+
+    for idx, wnid in enumerate(wnids):
+        parent = get_parent_synset(wnid, level=synset_level)
+        parent_name = parent.lemmas()[0].name().replace('_', ' ')
+        label_to_parent[idx] = parent_name
+        parent_names[parent_name] = parent_names.get(parent_name, len(parent_names))
+
+    # Mapping label_idx → indice du synset parent
+    n_synsets = len(parent_names)
+    label_to_synset_idx = {
+        idx: parent_names[name]
+        for idx, name in label_to_parent.items()
+    }
+
+    print(f"1000 classes → {n_synsets} synsets de niveau {synset_level}")
+    # Tensor de mapping pour usage GPU
+    label_to_synset_tensor = torch.tensor(
+        [label_to_synset_idx[i] for i in range(1000)],
+        dtype=torch.long
+    ).to(device)   # (1000,)
+
+    # Noms des synsets ordonnés par indice
+    synset_names = sorted(parent_names.keys(), key=lambda x: parent_names[x])
+    print(synset_names[:100])
+
+    model, _ = clip.load("ViT-L/14")
+    model.eval().cuda()
+
+    texts = clip.tokenize([f"a photo of a {s}" for s in synset_names]).cuda()
+
+    with torch.no_grad():
+        synset_clip_embeddings = model.encode_text(texts)   # (n_synsets, 768)
+
+    del model
+    torch.cuda.empty_cache()
+    if index_embeddings:
+        emb = None
+    else:
+        emb = synset_clip_embeddings
+    ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+                                                        n_classes=n_synsets,
+                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+
+
+else:
+    classes = ResNet50_Weights.DEFAULT.meta['categories']
+    print(len(classes))      # 1000
+    print(classes[0])        # 'tench'
+    print(classes[999])      # 'toilet tissue'
+    # Pour CLIP
+    texts = clip.tokenize([f"a photo of a {c}" for c in classes]).cuda()
+    model, _ = clip.load("ViT-L/14")
+    model.eval().cuda()
+    with torch.no_grad():
+        label_embeddings = model.encode_text(texts)        # (1000, 768)
+    # Effacer le modèle CLIP après utilisation
+    del model
+    torch.cuda.empty_cache()
+    if index_embeddings:
+        emb = None
+    else:
+        emb = label_embeddings
+    ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
 
 
 draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
@@ -348,7 +419,7 @@ if k>1:
 os.makedirs(save_dir, exist_ok=True)
 
 if supervised:
-    if False: #train_epochs == 100:
+    if train_epochs == 100:
         linear_optimizer = torch.optim.AdamW(
             [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
             {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
@@ -469,6 +540,10 @@ for epoch in range(train_epochs):
         y_probe = sys_[torch.arange(batch_size), idx_probe].to(device)
         z_probe = features[torch.arange(batch_size), idx_probe, :].to(device)
 
+        if use_synset_embeddings:
+            mem_labels = labels
+            labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
+
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if supervised:
                 if n_student_draws > 0:
@@ -479,7 +554,8 @@ for epoch in range(train_epochs):
                     output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
                 output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
 
-            #
+            if use_synset_embeddings:
+                labels = mem_labels
 
             if cross_integration:
                 center_seeds = []
@@ -645,6 +721,10 @@ for epoch in range(train_epochs):
                     y_probe = sys_[torch.arange(batch_size), idx_probe].to(device)
                     z_probe = features[torch.arange(batch_size), idx_probe, :].to(device)
 
+                    if use_synset_embeddings:
+                        mem_labels = labels
+                        labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
+
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                         if n_student_draws > 0:
                             output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
@@ -652,6 +732,8 @@ for epoch in range(train_epochs):
                         if supervised:
                             output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
 
+                        if use_synset_embeddings:
+                            labels = mem_labels
                         mem_w = []
                         mem_w_sup = []
                         if cross_integration:
