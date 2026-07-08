@@ -60,7 +60,7 @@ std = 0.5 / zoom
 n_sab = 2
 self_att = False
 
-k = 3       # n_seeds
+k = 12       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -70,15 +70,19 @@ n_student_draws = 4
 n_teacher_draws = 3
 
 orig = False
-grid = False
+grid = True
 curriculum = False
+finetune = False
 
 if grid:
     n_saccades_max = 121
-    n_uplet_student = 3
-    n_uplet_teacher = 7
+    n_uplet_student = 9
+    n_uplet_teacher = 18
     n_student_draws = 6
     n_teacher_draws = 3
+if finetune:
+    n_student_draws = 0
+    n_teacher_draws = 1
 
 
 train_epochs = 30
@@ -102,6 +106,8 @@ vicreg = False # more seed diversity
 test3 = False # no sample diversity
 strict_global_step = False
 cross_integration = True # cross_draws_integration
+if finetune:
+    cross_integration = False
 
 residual = True
 l_emb_detach = True
@@ -131,18 +137,12 @@ if vicreg: suffix = suffix + "_VICREG"
 if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
 if cross_integration : suffix = suffix + "_CROSS"
-if curriculum:
-    #load_dir = f"../checkpoints/260528_IST1+ABMIL_semi_z_lam0.05_sab2_LeJ{suffix}_s{n_uplet_student}_t{n_uplet_teacher}_(**)"
-    #load_dir = "../checkpoints/260614_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_alph1e-06_TEST_CROSS_s3_t5_space_(*)"
-    #load_dir = "../checkpoints/260616_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a1e-06_TEST_CROSS_APOS_s3_t5_space"
-    #load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_TEST_CROSS_APOS_s3_t5_space"
-    if supervised:
-        load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a1e-06_TEST_CROSS_APOS2_s3_t5_space"
-    else:
-        load_dir = "../checkpoints/260617_IST3+ABMIL_semi_z_lam0.05_mu_1_sab2_LeJ_TEST_CROSS_APOS2_s3_t5_space"
-    suffix = suffix + "_CURRI"
-if grid : 
-    suffix = suffix + "_GRID"
+if curriculum or finetune:
+    load_dir = "../checkpoints/260630_ISTQ_3_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a3e-06_TEST_CROSS_RES_DETACH_SMOOTH_APOS2_s3_t5_space"
+if curriculum: suffix = suffix + "_CURRI"
+if finetune: 
+    suffix = suffix + "_FINE"
+if grid : suffix = suffix + "_GRID"
     
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
@@ -347,7 +347,7 @@ if k>1:                                     # cross-draws integration (seed dive
             ) for _ in range(k)
         ])
 
-if curriculum:
+if curriculum or finetune:
     epoch_ist = 30
     checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_ist}.pt")  # exemple
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -419,24 +419,40 @@ if k>1:
 os.makedirs(save_dir, exist_ok=True)
 
 if supervised:
-    if train_epochs == 100:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
-            {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=3e-4, #0.04,  
-        )
+    if finetune:
+        if train_epochs == 100:
+            linear_optimizer = torch.optim.AdamW([
+                {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                weight_decay=3e-4, #0.04,  
+            )
+            
+        else:
+            linear_optimizer = torch.optim.AdamW([
+                {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                weight_decay=1e-3, #0.04,  
+            )
+        ist_transformer.requires_grad_(False)
     else:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
-            {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=1e-3, #0.04,  
-        )
+        if train_epochs == 100:
+            linear_optimizer = torch.optim.AdamW(
+                [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
+                {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
+                {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+                {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
+                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                weight_decay=3e-4, #0.04,  
+            )
+        else:
+            linear_optimizer = torch.optim.AdamW(
+                [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+                {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
+                {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
+                {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
+                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                weight_decay=1e-3, #0.04,  
+            )
 else:
     if curriculum:
         optimizer = torch.optim.AdamW(

@@ -688,7 +688,7 @@ class QueryBlock(nn.Module):
         self.residual = residual
         self.l_emb_detach = l_emb_detach
 
-    def forward(self, views, seeds, l_emb, z, block_idx):
+    def forward(self, views, seeds, l_emb, z, block_idx, pos_guess=False):
         # ── 1. Vues se transforment entre elles ──────────────────────
 
         v = self.view_norm(views)
@@ -716,7 +716,7 @@ class QueryBlock(nn.Module):
         
         if residual:
             h_label = l_norm + h_label
-            label_out      = h_label + self.label_ffn(self.pos_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            label_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
         else:
             label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
@@ -727,7 +727,10 @@ class QueryBlock(nn.Module):
             h_pos = z_norm + h_pos
             pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
-            pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            if pos_guess:
+                pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
+            else:
+                pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
@@ -789,15 +792,29 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
             l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
         elif labels is not None:
-            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            if labels.size() == (B, 1000):
+                logits = labels
+                probs = torch.softmax(logits, dim=-1)      # (B, n_classes)
+                l_emb = probs @ self.label_embedding.weight
+            else:
+                l_emb = self.label_embedding(labels)  # (B, emb_dim)
         else:
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
         
         l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb)).unsqueeze(1)
-        pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
+        if z == None: # position guess
+            pos = l_emb
+        else:
+            pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
 
         for idx_block, block in enumerate(self.blocks):
-            views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)   # co-évolution
+            
+            if z == None: # position guess
+                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block, pos_guess=True)   
+                #pos = l_emb
+            else:
+                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)  
+            #    pos = l_emb
 
         if self.normalize:
             return torch.cat([self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)], dim=1) #, attn_label, attn_pos   # (B, n_seeds, emb_dim)
