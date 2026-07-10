@@ -25,11 +25,12 @@ class ShiftZoomUplet:
 
         img_zoomed = FF.resize(img, (h_zoomed, w_zoomed),
                             interpolation=Image.BICUBIC)
+        y_prim = y
 
         # centre de fixation dans l'espace zoomé
         # x,y ∈ [-1,1] définis par rapport au petit côté original
         cx = w_zoomed / 2 + zoomed_ref * x / 2 #zoomed_ref / 2 * (1 + x / 2)   # ∈ [zoomed_ref/4, 3*zoomed_ref/4]
-        cy = h_zoomed / 2 + zoomed_ref * y / 2 #zoomed_ref / 2 * (1 + y / 2)
+        cy = h_zoomed / 2 + zoomed_ref * y_prim / 2 #zoomed_ref / 2 * (1 + y / 2)
 
         # crop de taille originale (w, h) centré en (cx, cy)
         left   = int(cx - w / 2)
@@ -85,13 +86,14 @@ class ShiftZoomGrid(ShiftZoomUplet):
         return views
     
 class FoveatedPyramidTransform:
-    def __init__(self, output_size=128):
+    def __init__(self, output_size=128, to_torch=False):
         """
         output_size : taille finale de la mosaïque (typiquement 128)
         Chaque sous-image fait output_size // 2 (ex: 64x64 si output_size=128)
         """
         self.output_size = output_size
         self.resized_size = output_size // 2
+        self.to_torch = to_torch
 
     def __call__(self, img, level=3):
         """
@@ -135,5 +137,7 @@ class FoveatedPyramidTransform:
         # S’assurer que la taille finale est bien 128×128
         mosaic = FF.resize(FF.to_pil_image(mosaic), (self.output_size, self.output_size), interpolation=FF.InterpolationMode.BICUBIC)
         #mosaic = FF.to_tensor(mosaic)
+        if self.to_torch:
+            mosaic = FF.to_tensor(mosaic)
 
         return mosaic

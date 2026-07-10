@@ -728,7 +728,9 @@ class QueryBlock(nn.Module):
             pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
             if pos_guess:
-                pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
+                h_pos = z_norm + h_label   # label cross-attn + pos residual
+                pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))
+                #pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
             else:
                 pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 
@@ -803,7 +805,8 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         
         l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb)).unsqueeze(1)
         if z == None: # position guess
-            pos = l_emb
+            pos = l_emb #
+            #pos = self.pre_label_ffn(self.pre_norm_l(self.cls_token.expand(B, -1, -1).squeeze(1))).unsqueeze(1)
         else:
             pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
 

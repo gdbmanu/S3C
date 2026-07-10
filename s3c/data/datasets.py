@@ -192,6 +192,55 @@ class ImageNetZDataset(Dataset):
 
     def __len__(self):
         return len(self.samples)
+    
+
+
+
+"""class FoveatedUpletDataset(torch.utils.data.Dataset):
+    def __init__(self, base_dataset, shift_zoom_uplet, fovea_transform):
+        self.base   = base_dataset
+        self.sz     = shift_zoom_uplet
+        self.fov    = fovea_transform
+
+    def __getitem__(self, idx):
+        img, label = self.base[idx]
+
+        views = self.sz(img)   # liste de (pil, sx, sy, zoom)
+
+        mosaics, sxs, sys_, zooms = [], [], [], []
+        for pil, sx, sy, zoom in views:
+            mosaic = self.fov(pil)           # → PIL 128×128
+            mosaic = FF.to_tensor(mosaic)    # (3, 128, 128)
+            mosaics.append(mosaic)
+            sxs.append(sx);  sys_.append(sy);  zooms.append(zoom)
+
+        # stack → (n_uplet, 3, 128, 128)  et vecteurs (n_uplet,)
+        mosaics = torch.stack(mosaics)
+        sxs     = torch.tensor(sxs,   dtype=torch.float32)
+        sys_    = torch.tensor(sys_,  dtype=torch.float32)
+        zooms   = torch.tensor(zooms, dtype=torch.float32)
+        return mosaics, sxs, sys_, zooms, label
+
+    def __len__(self):
+        return len(self.base)"""
+
+
+def collate_uplet(batch):
+    """
+    Collate qui empile correctement les uplets.
+    Retourne :
+      mosaics : (B, n_uplet, 3, H, W)
+      sxs     : (B, n_uplet)
+      sys_    : (B, n_uplet)
+      zooms   : (B, n_uplet)
+      labels  : (B,)
+    """
+    mosaics = torch.stack([b[0] for b in batch])
+    sxs     = torch.stack([b[1] for b in batch])
+    sys_    = torch.stack([b[2] for b in batch])
+    zooms   = torch.stack([b[3] for b in batch])
+    labels  = torch.tensor([b[4] for b in batch])
+    return mosaics, sxs, sys_, zooms, labels
 
 
 # %%

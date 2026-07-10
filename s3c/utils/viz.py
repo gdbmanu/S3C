@@ -181,3 +181,56 @@ def visualize_saccades(dataset, idx=0, n_views=5, zoom=1.5, std=0.3, seed=42):
                 bbox_inches='tight', facecolor='black')
     plt.show()
     return fig
+
+
+@torch.no_grad()
+def compute_saliency_grid(
+        dino_student_y,
+        dino_teacher,
+        img1, img2, 
+        grid_size=11,
+        y_min=-5/6, y_max=5/6,
+        zoom=1,
+        device='cuda',
+        norm=False
+    ):
+    device = next(dino_student_y.parameters()).device
+
+    # --- Préparation : force batch size = 1 ---
+    if img1.ndim == 3:
+        img1 = img1.unsqueeze(0)
+    if img2.ndim == 3:
+        img2 = img2.unsqueeze(0)
+    
+    img1 = img1.to(device)
+    img2 = img2.to(device)
+
+    z1_ref = dino_teacher.forward_features(img1)[:, 0, :]      # (1, 768)
+
+    # --- Embedding teacher (vecteur de référence) ---
+    z2 = dino_teacher.forward_features(img2)[:, 0, :]      # (1, 768)
+    if norm:
+        z2_norm = F.normalize(z2, dim=-1)
+
+
+    # --- Grille 11×11 de valeurs Y ---
+    xs = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
+    ys = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
+    X, Y = torch.meshgrid(xs, ys, indexing="xy")  # X: horizontal, Y: vertical
+
+    grid = torch.stack([X, Y], dim=-1)            # (11,11,2)  -> (x,y)
+    grid_flat = grid.reshape(-1, 2)               # (121,2)
+
+    # Répéter l’image pour 121 positions
+    img1_rep = img1.expand(grid_flat.shape[0], -1, -1, -1)             # (121, 3,128,128)
+
+    # --- Forward student sur toute la grille ---
+    z1_batch, z_y_batch = dino_student_y(img1_rep, grid_flat, layernorm=False)          # z_y_batch shape (121, 768)
+    if norm:
+        z_y_batch_norm = F.normalize(z_y_batch, dim=-1)
+
+    # --- Produit scalaire avec le vecteur enseignant ---
+    saliency = torch.sum(z_y_batch_norm * z2_norm, dim=-1)                       # (121,)
+    saliency = saliency.reshape(grid_size, grid_size)                  # (11, 11)
+
+    return z1_ref, z2, saliency #saliency, grid, z_y_batch.reshape(grid_size, grid_size, -1), z2
