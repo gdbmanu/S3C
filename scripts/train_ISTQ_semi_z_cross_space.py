@@ -109,11 +109,11 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-residual = True
+residual = False
 l_emb_detach = True
 label_smoothing = 0.5
 use_synset_embeddings = True
-index_embeddings = True
+index_embeddings = False
 
 abmil_pos = True
 abmil_label = False
@@ -231,7 +231,7 @@ if use_synset_embeddings:
     label_to_parent = {}
     parent_names    = {}
 
-    synset_level = 3
+    synset_level = 4
 
     for idx, wnid in enumerate(wnids):
         parent = get_parent_synset(wnid, level=synset_level)

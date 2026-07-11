@@ -715,7 +715,7 @@ class IterativeSeedTransformerwithSimpleQuery(nn.Module):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
-        self.pre_norm_z  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.pre_norm_z  = nn.LayerNorm(emb_dim)   # sur le token pos
 
         self.pre_label_ffn = nn.Sequential(
             nn.Linear(emb_dim, 4 * emb_dim),
@@ -773,21 +773,21 @@ class IterativeSeedTransformerwithSimpleQuery(nn.Module):
                 l_emb = self.label_embedding(labels)  # (B, emb_dim)
         else:
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
-        l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb)).unsqueeze(1)
+        l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb))
 
-        if z == None: # position guess
+        if z is None: # position guess
             #pos = l_emb #
-            pos = self.pre_label_ffn(self.pre_norm_l(self.cls_token.expand(B, -1, -1).reshape(B, -1))).unsqueeze(1)
+            pos = self.pre_label_ffn(self.pre_norm_l(self.cls_token.expand(B, -1, -1).reshape(B, -1)))
         else:
-            pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
+            pos = self.pre_pos_ffn(self.pre_norm_z(z))
         
-        query = torch.stack([l_emb, pos], dim=1)
+        queries = torch.stack([l_emb, pos], dim=1)
 
         for idx_block, block in enumerate(self.blocks):        
-            views, seeds, query, attn = block(views, seeds, query, idx_block)   
+            views, seeds, queries, attn = block(views, seeds, queries, idx_block)   
         
-        l_emb = query[:,0,:].unsqueeze(1)
-        pos = query[:,1,:].unsqueeze(1)
+        l_emb = queries[:,0,:].unsqueeze(1)
+        pos = queries[:,1,:].unsqueeze(1)
 
         if self.normalize:
             return torch.cat([self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)], dim=1) #, attn_label, attn_pos   # (B, n_seeds, emb_dim)
@@ -842,7 +842,9 @@ class QueryBlock(nn.Module):
         ## LABELS
 
         # Norms Pre-LN
-        self.label_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+        #self.label_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+        #self.pos_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+        self.query_norm  = nn.LayerNorm(emb_dim)
         self.kv_norm = nn.LayerNorm(emb_dim)   # sur les seeds
 
         # Cross-attention : query (Q) × seeds (K, V)
@@ -850,6 +852,18 @@ class QueryBlock(nn.Module):
             emb_dim, n_heads, dropout=dropout, batch_first=True
         )
 
+        self.query_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.query_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+
+        '''
         # FFN sur le token label après cross-attention
         self.label_norm_ffn = nn.LayerNorm(emb_dim)
         
@@ -864,7 +878,6 @@ class QueryBlock(nn.Module):
         ## POS
 
         # Norms Pre-LN
-        self.pos_norm  = nn.LayerNorm(emb_dim)   # sur le token label
 
         self.pos_norm_ffn = nn.LayerNorm(emb_dim)
 
@@ -874,7 +887,7 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(4 * emb_dim, emb_dim),
             nn.Dropout(dropout),
-        )
+        )'''
 
         self.n_blocks = n_blocks
         self.residual = residual
@@ -894,7 +907,7 @@ class QueryBlock(nn.Module):
         s = s + h_seeds 
         s = s + self.seed_ffn(self.seed_norm_ffn(s))
 
-        l_norm  = self.label_norm(l_emb)
+        l_norm  = self.query_norm(l_emb)
         kv_norm = self.kv_norm(s)
 
         if self.residual:
@@ -908,23 +921,26 @@ class QueryBlock(nn.Module):
         
         if residual:
             h_label = l_norm + h_label
-            label_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            #label_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            label_out      = h_label + self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)
         else:
-            label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+            #label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+            label_out      = self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
-        z_norm =  self.pos_norm(z)
+        z_norm =  self.query_norm(z)
         h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
         
         if residual:
             h_pos = z_norm + h_pos
-            pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            #pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
             if pos_guess:
                 h_pos = z_norm + h_label   # label cross-attn + pos residual
-                pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))
+                pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
                 #pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
             else:
-                pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+                pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
@@ -1005,7 +1021,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         for idx_block, block in enumerate(self.blocks):
             
             if z == None: # position guess
-                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block, pos_guess=True)   
+                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block) #, pos_guess=True)   
                 #pos = l_emb
             else:
                 views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)  
