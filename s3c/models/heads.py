@@ -701,9 +701,9 @@ class SimpleQueryBlock(nn.Module):
         
         if residual:
             h_label = q_norm + h_label
-            query_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            query_out      = h_label + self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)
         else:
-            query_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+            query_out      = self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
         return v, s, query_out, attn
     
@@ -793,7 +793,6 @@ class IterativeSeedTransformerwithSimpleQuery(nn.Module):
             return torch.cat([self.norm_seeds(seeds), self.norm_label(l_emb), self.norm_pos(pos)], dim=1) #, attn_label, attn_pos   # (B, n_seeds, emb_dim)
         else:
             return torch.cat([seeds, l_emb, pos], dim=1) #seeds, l_emb, pos, attn_label, attn_pos
-
 
 
 class QueryBlock(nn.Module):

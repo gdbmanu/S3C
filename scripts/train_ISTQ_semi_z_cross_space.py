@@ -28,7 +28,7 @@ import clip
 from torchvision.models import ResNet50_Weights
 
 
-from s3c.models.heads import IterativeSeedTransformerwithQuery, AttentionPooling #FovealSetTransformer
+from s3c.models.heads import IterativeSeedTransformerwithQuery, IterativeSeedTransformerwithSimpleQuery, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
 from s3c.models.heads import  ABMILPosPredictor, ABMILLabelPredictor, PosPredictor
@@ -74,6 +74,7 @@ grid = False
 curriculum = False
 finetune = False
 
+
 if grid:
     n_saccades_max = 121
     n_uplet_student = 9
@@ -115,6 +116,8 @@ label_smoothing = 0.5
 use_synset_embeddings = True
 synset_level = 4
 index_embeddings = False
+simple = False
+
 
 abmil_pos = True
 abmil_label = False
@@ -159,6 +162,9 @@ if index_embeddings:
     suffix = suffix + "_INDEX"
 if use_synset_embeddings:
     suffix = suffix + f"_SYNSET{synset_level}"
+
+if simple:
+    suffix = suffix + '_SIMPLE'
     
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
@@ -279,7 +285,14 @@ if use_synset_embeddings:
         'label_to_synset': label_to_synset_tensor.cpu(), # (1000,)
         'n_synsets':       n_synsets,
     }, f'imagenet_synset_{synset_level}_embeddings.pt')
-    ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+
+    if simple:
+        ist_transformer = IterativeSeedTransformerwithSimpleQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+                                                        n_classes=n_synsets,
+                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+
+    else:
+        ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
                                                         n_classes=n_synsets,
                                                         residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
 
@@ -302,7 +315,11 @@ else:
         emb = None
     else:
         emb = label_embeddings
-    ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+    if simple:
+        ist_transformer = IterativeSeedTransformerwithSimpleQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+    else:
+        ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
                                                         residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
 
 
