@@ -60,7 +60,7 @@ std = 0.5 / zoom
 n_sab = 2
 self_att = False
 
-k = 12       # n_seeds
+k = 3 #12       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -70,7 +70,7 @@ n_student_draws = 4
 n_teacher_draws = 3
 
 orig = False
-grid = True
+grid = False
 curriculum = False
 finetune = False
 
@@ -113,6 +113,7 @@ residual = False
 l_emb_detach = True
 label_smoothing = 0.5
 use_synset_embeddings = True
+synset_level = 4
 index_embeddings = False
 
 abmil_pos = True
@@ -157,7 +158,7 @@ if label_smoothing != 0.:
 if index_embeddings:
     suffix = suffix + "_INDEX"
 if use_synset_embeddings:
-    suffix = suffix + "_SYNSET"
+    suffix = suffix + f"_SYNSET{synset_level}"
     
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
@@ -223,15 +224,13 @@ val_loader = DataLoader(
 
 if use_synset_embeddings:
 
-    dataset = ImageFolder(root='~/data/Imagenet/val')
+    dataset = ImageFolder(root='~/data/Imagenet_full/val')
     wnids = list(dataset.class_to_idx.keys())   # ['n01440764', ...]
     wnids = sorted(wnids)                        # ordre alphabétique = ordre ImageNet standard
     print(len(wnids))   # 1000
 
     label_to_parent = {}
     parent_names    = {}
-
-    synset_level = 4
 
     for idx, wnid in enumerate(wnids):
         parent = get_parent_synset(wnid, level=synset_level)
@@ -257,6 +256,8 @@ if use_synset_embeddings:
     synset_names = sorted(parent_names.keys(), key=lambda x: parent_names[x])
     print(synset_names[:100])
 
+    
+
     model, _ = clip.load("ViT-L/14")
     model.eval().cuda()
 
@@ -271,6 +272,13 @@ if use_synset_embeddings:
         emb = None
     else:
         emb = synset_clip_embeddings
+
+    torch.save({
+        'embeddings':      synset_clip_embeddings.cpu(),   # (n_synsets, 768)
+        'synset_names':    synset_names,               # liste de noms
+        'label_to_synset': label_to_synset_tensor.cpu(), # (1000,)
+        'n_synsets':       n_synsets,
+    }, f'imagenet_synset_{synset_level}_embeddings.pt')
     ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
                                                         n_classes=n_synsets,
                                                         residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
