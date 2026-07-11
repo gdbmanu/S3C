@@ -110,7 +110,7 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-residual = False
+residual = True
 l_emb_detach = True
 label_smoothing = 0.5
 use_synset_embeddings = True
@@ -954,7 +954,8 @@ for epoch in range(train_epochs):
                 "draws_attention": draws_attention.state_dict(),
                 "seeds_mlp": seeds_mlp.state_dict(),
                 "linear_head": linear_head.state_dict(),
-                "pos_predictor": pos_predictor.state_dict()
+                "pos_predictor": pos_predictor.state_dict(),
+                "heads_per_seed": heads_per_seed.state_dict() if k>1 else None
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
 
     if schedule:
