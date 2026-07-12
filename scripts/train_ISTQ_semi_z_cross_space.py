@@ -90,7 +90,7 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = True
+supervised = False
 if supervised:
     pure = False
     alpha = 3e-6 #1e-6 # #1e-5 #3e-7
@@ -111,7 +111,9 @@ if finetune:
     cross_integration = False
 
 residual = True
-l_emb_detach = True
+if residual:
+    full_residual = True
+l_emb_detach = False
 label_smoothing = 0.5
 use_synset_embeddings = True
 synset_level = 4
@@ -153,6 +155,8 @@ if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
 if bottleneck_dim != 768 : suffix = suffix + f"_BOTTLE{bottleneck_dim}"
 
 if residual:
+    if full_residual:
+        suffix = suffix + '_FULL'
     suffix = suffix + "_RES"
 if l_emb_detach:
     suffix = suffix + "_DETACH"
@@ -262,8 +266,6 @@ if use_synset_embeddings:
     synset_names = sorted(parent_names.keys(), key=lambda x: parent_names[x])
     print(synset_names[:100])
 
-    
-
     model, _ = clip.load("ViT-L/14")
     model.eval().cuda()
 
@@ -293,8 +295,8 @@ if use_synset_embeddings:
 
     else:
         ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                        n_classes=n_synsets,
-                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+                                                        n_classes=n_synsets, residual=residual,
+                                                        full_residual=full_residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
 
 
 else:
@@ -695,13 +697,15 @@ for epoch in range(train_epochs):
 
         linear_optimizer.zero_grad()
         loss_label.backward()
-        #grad_norm = torch.nn.utils.clip_grad_norm_(linear_head.parameters(), 1.0)
+        if supervised:
+            torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(pos_predictor.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(draws_attention.parameters(), 1.0)
         linear_optimizer.step()
 
         if k>1:
             seeds_optimizer.zero_grad()
             loss_seeds.backward()
-            #grad_norm = torch.nn.utils.clip_grad_norm_(seeds_optimizer.parameters(), 1.0)
             seeds_optimizer.step()
 
         total_loss += loss.item()

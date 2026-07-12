@@ -803,7 +803,7 @@ class QueryBlock(nn.Module):
     """
 
     def __init__(self, emb_dim=768, n_heads=12, 
-                 n_classes=1000,  dropout=0.1, residual=False, l_emb_detach=False, n_blocks=2):
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, l_emb_detach=False, n_blocks=2):
         super().__init__()
 
         ## VIEWS
@@ -891,6 +891,7 @@ class QueryBlock(nn.Module):
         self.n_blocks = n_blocks
         self.residual = residual
         self.l_emb_detach = l_emb_detach
+        self.full_residual = full_residual
 
     def forward(self, views, seeds, l_emb, z, block_idx, pos_guess=False):
         # ── 1. Vues se transforment entre elles ──────────────────────
@@ -910,7 +911,10 @@ class QueryBlock(nn.Module):
         kv_norm = self.kv_norm(s)
 
         if self.residual:
-            residual = block_idx < self.n_blocks - 1
+            if self.full_residual:
+                residual = True
+            else:
+                residual = block_idx < self.n_blocks - 1
         else:
             residual = False
         if self.l_emb_detach:
@@ -947,7 +951,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
                  normalize=False, n_classes=1000, frozen_emb = True, residual=False, l_emb_detach=False,
-                 label_smoothing=0.1):
+                 label_smoothing=0.1, full_residual=False):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
@@ -984,7 +988,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
         self.blocks = nn.ModuleList([
             QueryBlock(emb_dim, n_heads, n_blocks=n_blocks, 
-                       residual=residual, l_emb_detach=l_emb_detach) for _ in range(n_blocks)
+                       residual=residual, l_emb_detach=l_emb_detach, full_residual=full_residual) for _ in range(n_blocks)
         ])
         self.normalize = normalize
         self.norm_seeds = nn.LayerNorm(emb_dim)
@@ -1020,7 +1024,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         for idx_block, block in enumerate(self.blocks):
             
             if z == None: # position guess
-                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block) #, pos_guess=True)   
+                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block, pos_guess=True)   
                 #pos = l_emb
             else:
                 views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)  
