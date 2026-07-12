@@ -980,6 +980,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             self.label_embedding.weight.data.copy_(pretrained_embeddings)
         else:
             self.label_embedding = nn.Embedding(n_classes, emb_dim)
+            frozen_emb = False
         # Optionnel : geler les embeddings  
         if frozen_emb:
             self.label_embedding.weight.requires_grad = False
