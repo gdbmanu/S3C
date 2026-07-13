@@ -776,6 +776,7 @@ for epoch in range(train_epochs):
                         output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
                         if supervised:
                             output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
+                            # Oracle output
 
                         if use_synset_embeddings:
                             labels = mem_labels
