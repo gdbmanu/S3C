@@ -90,8 +90,9 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = False
+supervised = True
 if supervised:
+    pos_supervised = True
     pure = False
     alpha = 3e-6 #1e-6 # #1e-5 #3e-7
     beta = 1e-4
@@ -112,14 +113,16 @@ if finetune:
 
 residual = True
 if residual:
-    full_residual = True
+    full_residual = False # True #
 l_emb_detach = False
-label_smoothing = 0.5
-use_synset_embeddings = True
+if supervised:
+    label_smoothing = 0.5
+else:
+    label_smoothing = 0.1
+use_synset_embeddings = True # False # 
 synset_level = 4
 index_embeddings = False
 simple = False
-
 
 abmil_pos = True
 abmil_label = False
@@ -127,11 +130,17 @@ abmil_label = False
 suffix = ""
 if supervised : 
     if pure: suffix = suffix + "_PURESUP"
-    else: suffix = suffix + "_SUP"
+    else: 
+        if pos_supervised:
+            suffix = suffix + "_POS_SUP"
+        else:
+            suffix = suffix + "_SUP"
     suffix = suffix + f"_a{alpha}"
     if beta != 1e-4 : suffix = suffix + f"_b{beta}"
+    label_mask = 0.8
 else:
     pure = False
+    label_mask = 0.2
 
 if self_att : suffix = suffix + '_SELF'
 
@@ -291,12 +300,14 @@ if use_synset_embeddings:
     if simple:
         ist_transformer = IterativeSeedTransformerwithSimpleQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
                                                         n_classes=n_synsets,
-                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing,
+                                                        label_mask=label_mask)
 
     else:
         ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
                                                         n_classes=n_synsets, residual=residual,
-                                                        full_residual=full_residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+                                                        full_residual=full_residual, l_emb_detach=l_emb_detach, 
+                                                        label_smoothing=label_smoothing, label_mask=label_mask)
 
 
 else:
@@ -319,10 +330,12 @@ else:
         emb = label_embeddings
     if simple:
         ist_transformer = IterativeSeedTransformerwithSimpleQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+                                                        residual=residual, l_emb_detach=l_emb_detach, 
+                                                        label_smoothing=label_smoothing,  label_mask=label_mask)
     else:
         ist_transformer = IterativeSeedTransformerwithQuery(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                        residual=residual, l_emb_detach=l_emb_detach, label_smoothing=label_smoothing)
+                                                        residual=residual, l_emb_detach=l_emb_detach, 
+                                                        label_smoothing=label_smoothing, label_mask=label_mask)
 
 
 draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
@@ -349,20 +362,15 @@ else:
                     nn.Linear(embed_dim, 1000),
                 )
 
-if supervised:
-    k_prim = k
-else:
-    k_prim = k+1
-
 seeds_mlp = nn.Sequential(
-    nn.Unflatten(1, (k_prim, embed_dim)),          # (B, k*d) → (B, k, d)
+    nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
     nn.LayerNorm(embed_dim),                  # norm par seed ✓
     nn.Flatten(1),                            # (B, k, d) → (B, k*d)
-    nn.Linear(k_prim * embed_dim, k_prim * embed_dim),
+    nn.Linear(k * embed_dim, k * embed_dim),
     nn.ReLU(),
-    nn.Linear(k_prim * embed_dim, k_prim * embed_dim),
+    nn.Linear(k * embed_dim, k * embed_dim),
     nn.ReLU(),
-    nn.Linear(k_prim * embed_dim, bottleneck_dim),
+    nn.Linear(k * embed_dim, bottleneck_dim),
 )
 
 if k>1:                                     # cross-draws integration (seed diversity)
@@ -421,6 +429,31 @@ if curriculum or finetune:
     print("❗ Paramètres manquants :", missing)
     print("⚠️ Paramètres inattendus :", unexpected)'''
 
+if pos_supervised:
+    z_linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
+
+    z_linear_head = nn.Linear(embed_dim, 1000)
+
+    checkpoint_path = os.path.join(z_linear_head_dir, f"checkpoint_epoch20.pt")  
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    # Vérifie les clés disponibles
+    print("Clés du checkpoint :", checkpoint.keys())
+    # --- Récupération des poids du teacher ---
+    if "classifier" not in checkpoint:
+        raise KeyError(f"Aucune clé 'classifier' trouvée dans {checkpoint_path}")
+
+    state_dict = checkpoint["classifier"]
+
+    # --- Chargement dans le modèle ---
+    missing, unexpected = z_linear_head.load_state_dict(state_dict, strict=False)
+
+    print("➡️ Poids chargés (z_linear_head).")
+    print("❗ Paramètres manquants :", missing)
+    print("⚠️ Paramètres inattendus :", unexpected)
+
+    z_linear_head.to(device)
+    z_linear_head.train()
+
 
 ist_transformer.to(device)
 ist_transformer.train()
@@ -438,6 +471,7 @@ pos_predictor.train()
 
 seeds_mlp.to(device)
 seeds_mlp.train()
+
 
 if k>1:
     heads_per_seed.to(device)
@@ -482,11 +516,12 @@ if supervised:
             )
 else:
     if curriculum:
-        optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
+        optimizer = torch.optim.AdamW([
+            {'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
             {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': 3e-5}, #1e-5},
-            {'params': seeds_mlp.parameters(),       'lr': 1e-4}], #1e-5},
+            {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
+            ], #1e-5},
             weight_decay=3e-4, #0.04,  
         )
     else:
@@ -544,8 +579,7 @@ history = {"epoch": [], "batch": [], "loss": [],
 for j in range(k):
     history[f"classif {j}"] = []
 history[f"classif"] = []
-if supervised:
-    history[f"sup classif"] = []
+history[f"sup classif"] = []
 
 os.makedirs(save_dir, exist_ok=True)
 
@@ -559,14 +593,28 @@ for epoch in range(train_epochs):
 
     for batch_idx, (features, sxs, sys_, labels) in enumerate(pbar):
 
+        batch_size, n = sxs.shape
+
         #features  : (B, n_saccades_max, 768)
+        features = features.to(device)
         labels   = labels.to(device)
         sxs   = sxs.to(device)
         sys_   = sys_.to(device)
 
+        if pos_supervised:
+            logits = z_linear_head(features.view(batch_size * n_saccades_max, -1))   # (B*n_sac, 1000)
+            logits = logits.view(batch_size, n_saccades_max, 1000)                    # (B, n_sac, 1000)
+
+            # logit du label correct pour chaque saccade
+            correct_logits = logits[torch.arange(batch_size), :, labels]              # (B, n_sac)
+            # meilleure saccade
+            i_star = correct_logits.argmax(dim=1)                            # (B,)
+            # coordonnées
+            x_star = sxs[torch.arange(batch_size),  i_star]                          # (B,)
+            y_star = sys_[torch.arange(batch_size), i_star]                           # (B,)
+
         # Génère des indices aléatoires pour chaque échantillon du batch
         # Shape : (batch_size, k)
-        batch_size, n = sxs.shape
         perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
 
         b_student = n_uplet_student * n_student_draws
@@ -589,9 +637,14 @@ for epoch in range(train_epochs):
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             if supervised:
-                if n_student_draws > 0:
-                    output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, z_probe) for i in range(n_student_draws)], dim=1)
-                output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
+                if pos_supervised:
+                    if n_student_draws > 0:
+                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, None) for i in range(n_student_draws)], dim=1)
+                    output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, None) for i in range(n_teacher_draws)], dim=1)
+                else:
+                    if n_student_draws > 0:
+                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, z_probe) for i in range(n_student_draws)], dim=1)
+                    output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
             else:
                 if n_student_draws > 0:
                     output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
@@ -610,32 +663,46 @@ for epoch in range(train_epochs):
             else:
                 centers = output_t.mean(dim=1)
 
-            seed_centers = centers[:,:k_prim,:]
-            z_center = seeds_mlp(seed_centers.view(batch_size, k_prim*embed_dim))
-            l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
-            pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
+            seed_centers = centers[:,:k,:]
+            z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+            
+            l_emb_center = centers[:,k,:] #.view(batch_size, embed_dim)
+
+            pos_center = centers[:,k+1,:] #.view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
             loss_sigreg = torch.tensor(0.).to(device)
 
-            if test and n_student_draws > 0:
+            if test and n_student_draws > 0:   ### SEED DIVERSITY ###
                 if k>1:
-                    for j in range(k_prim): # seeds loop
+                    for j in range(k): # seeds loop
                         for i in range(n_student_draws):           
-                            loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                            loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds                            
                         if not strict_global_step:
                             global_step += 1 # !!! TEST !!!
+                    if not supervised:
+                        for i in range(n_student_draws):           
+                            loss_sigreg += 0.1 * sigreg(output_s[:,i,k,:].float(), global_step) # !! TEST diversité sur les seeds                            
+                        if not strict_global_step:
+                            global_step += 1 # !!! TEST !!!
+
                 else:
                     assert False # not consistent
 
             if n_student_draws > 0:
                 z_draws = []
                 for i in range(n_student_draws):
-                    z_draw = seeds_mlp(output_s[:,i,:k_prim,:].view(batch_size, k_prim*embed_dim))
+                    z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
                     if stop_gradient:
                         loss_jepa += mse(z_draw, z_center.detach())
                     else:
                         loss_jepa += mse(z_draw, z_center) 
+                    if not supervised:
+                        l_emb_student = output_s[:,i,k,:]
+                        if stop_gradient:
+                            loss_jepa += 0.1 * mse(l_emb_student, l_emb_center.detach())
+                        else:
+                            loss_jepa += 0.1 * mse(l_emb_student, l_emb_center) 
                     
                     if not test3:
                         loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -668,7 +735,10 @@ for epoch in range(train_epochs):
                 if pure:
                     loss_label = loss = criterion(output_t_head, labels)
                 else:
-                    pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
+                    if pos_supervised:
+                        pos_target = torch.stack([x_star, y_star], dim=1)
+                    else:
+                        pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                     loss_pos = F.mse_loss(pos_pred, pos_target)
                     
                     loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + criterion(output_t_head, labels)
@@ -736,13 +806,14 @@ for epoch in range(train_epochs):
             seeds_correct = [0.0 for j in range(k)]
             val_iter = iter(val_loader)
 
-            if supervised:
+            if True:
                 correct_sup = 0.0
 
             with torch.no_grad():
                 for n_val in range(5):
                     features, sxs, sys_, labels = next(val_iter)
                     #features  : (B, n_saccades_max, 768)
+                    features = features.to(device)
                     labels   = labels.to(device)
                     sxs   = sxs.to(device)
                     sys_   = sys_.to(device)
@@ -750,6 +821,19 @@ for epoch in range(train_epochs):
                     # Génère des indices aléatoires pour chaque échantillon du batch
                     # Shape : (batch_size, k)
                     batch_size, n = sxs.shape
+
+                    if pos_supervised:
+                        logits = z_linear_head(features.view(batch_size * n_saccades_max, -1))   # (B*n_sac, 1000)
+                        logits = logits.view(batch_size, n_saccades_max, 1000)                    # (B, n_sac, 1000)
+
+                        # logit du label correct pour chaque saccade
+                        correct_logits = logits[torch.arange(batch_size), :, labels]              # (B, n_sac)
+                        # meilleure saccade
+                        i_star = correct_logits.argmax(dim=1)                            # (B,)
+                        # coordonnées
+                        x_star = sxs[torch.arange(batch_size), i_star]                          # (B,)
+                        y_star = sys_[torch.arange(batch_size), i_star]                           # (B,)
+
                     perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
 
                     b_student = n_uplet_student * n_student_draws
@@ -774,9 +858,13 @@ for epoch in range(train_epochs):
                         if n_student_draws > 0:
                             output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
                         output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
+                        
                         if supervised:
-                            output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
-                            # Oracle output
+                            if pos_supervised:
+                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, None) for i in range(n_teacher_draws)], dim=1)
+                            else:
+                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
+                                # Oracle output
 
                         if use_synset_embeddings:
                             labels = mem_labels
@@ -790,26 +878,26 @@ for epoch in range(train_epochs):
                                 z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
                                 mem_w += [w]
                                 center_seeds.append(z)
-                                if supervised:
+                                if True:
                                     z_sup, w_sup = draws_attention(output_t_sup[:, :, seed_idx, :])           # (B, d)
                                     mem_w_sup += [w_sup]
                                     center_seeds_sup.append(z_sup)
                             centers = torch.stack(center_seeds, dim=1)
-                            if supervised:
+                            if True:
                                 centers_sup = torch.stack(center_seeds_sup, dim=1)
                         else:
                             centers = output_t.mean(dim=1)
                             centers_sup = output_t_sup.mean(dim=1)
 
 
-                        seed_centers = centers[:,:k_prim:]
-                        z_center = seeds_mlp(seed_centers.view(batch_size, k_prim*embed_dim))
+                        seed_centers = centers[:,:k:]
+                        z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
                         l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
                         pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
 
                         if supervised:
-                            seed_centers_sup = centers_sup[:,:k_prim,:]
-                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k_prim*embed_dim))
+                            seed_centers_sup = centers_sup[:,:k,:]
+                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k*embed_dim))
                             l_emb_center_sup = centers_sup[:,k,:].view(batch_size, embed_dim)
                             pos_center_sup = centers_sup[:,k+1,:].view(batch_size, embed_dim)
 
@@ -818,9 +906,14 @@ for epoch in range(train_epochs):
 
                         if test and n_student_draws > 0:
                             if k>1:
-                                for j in range(k_prim): # seeds loop
+                                for j in range(k): # seeds loop
                                     for i in range(n_student_draws):           
                                         loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds
+                                    if not strict_global_step:
+                                        global_step += 1 # !!! TEST !!!
+                                if not supervised:
+                                    for i in range(n_student_draws):           
+                                        loss_sigreg += 0.1 * sigreg(output_s[:,i,k,:].float(), global_step) # !! TEST diversité sur les seeds                            
                                     if not strict_global_step:
                                         global_step += 1 # !!! TEST !!!
                             else:
@@ -829,11 +922,18 @@ for epoch in range(train_epochs):
                         if n_student_draws > 0:
                             z_draws = []
                             for i in range(n_student_draws):
-                                z_draw = seeds_mlp(output_s[:,i,:k_prim,:].view(batch_size, k_prim*embed_dim))
+                                z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
                                 if stop_gradient:
                                     loss_jepa += mse(z_draw, z_center.detach())
                                 else:
                                     loss_jepa += mse(z_draw, z_center) 
+
+                                if not supervised:
+                                    l_emb_student = output_s[:,i,k,:]
+                                    if stop_gradient:
+                                        loss_jepa += 0.1 * mse(l_emb_student, l_emb_center.detach())
+                                    else:
+                                        loss_jepa += 0.1 * mse(l_emb_student, l_emb_center) 
                                 
                                 if not test3:
                                     loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -866,8 +966,10 @@ for epoch in range(train_epochs):
                                 output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
                                 output_t_head_sup = linear_head(l_emb_center_sup) #seed_centers.view(batch_size, k * embed_dim))
                             
-                            
-                            pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
+                            if pos_supervised:
+                                pos_target = torch.stack([x_star, y_star], dim=1)
+                            else:
+                                pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                             loss_pos = F.mse_loss(pos_pred, pos_target)
                             loss_pos_sup = F.mse_loss(pos_pred_sup, pos_target)
                             
@@ -876,13 +978,17 @@ for epoch in range(train_epochs):
                             #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                             if abmil_pos:
                                 pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
+                                pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
                             else:
                                 pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
+                                pos_pred_sup = pos_predictor(seed_centers_sup, pos_center_sup)     
                             
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                             loss_pos = F.mse_loss(pos_pred, pos_target)
+                            loss_pos_sup = F.mse_loss(pos_pred_sup, pos_target)
 
-                            output_t_head = output_t_head = linear_head(l_emb_center) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                            output_t_head = linear_head(l_emb_center) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                            output_t_head_sup = linear_head(l_emb_center_sup) #seed_centers.view(batch_size, k * embed_dim))
                             loss_label = criterion(output_t_head, labels)
 
                             loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos
@@ -890,7 +996,10 @@ for epoch in range(train_epochs):
                     if n_val == 0:
                         ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                         print(f"ratio sigreg/jepa = {ratio:.2f}")
-                        print(f"pos target : ({x_probe[0].item():.2f},{y_probe[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
+                        if pos_supervised:
+                            print(f"pos target : ({x_star[0].item():.2f},{y_star[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
+                        else:
+                            print(f"pos target : ({x_probe[0].item():.2f},{y_probe[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
                         print(f"pos error = {np.sqrt(loss_pos.item()):.2f}")
                         
                         if cross_integration:
@@ -898,8 +1007,7 @@ for epoch in range(train_epochs):
                                 for i in range(k):
                                     print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
                                 print(f"label", mem_w[k][0,...].detach().float().cpu().numpy().flatten())
-                                if supervised:
-                                    print(f"label_sup", mem_w_sup[k][0,...].detach().float().cpu().numpy().flatten())
+                                print(f"label_sup", mem_w_sup[k][0,...].detach().float().cpu().numpy().flatten())
                                 print(f"pos", mem_w[k+1][0,...].detach().float().cpu().numpy().flatten())
                                 #print("global", w[0,...].detach().float().cpu().numpy())
                                 '''if abmil_pos:
@@ -919,23 +1027,20 @@ for epoch in range(train_epochs):
                     running_label += loss_label.item()
                     running_pos += loss_pos.item()
 
-                    if supervised :
-                        preds_sup = output_t_head_sup.argmax(dim=1)
-                        correct_sup += (preds_sup == labels).sum().item()
+                    preds_sup = output_t_head_sup.argmax(dim=1)
+                    correct_sup += (preds_sup == labels).sum().item()
 
                     total += labels.size(0)
 
             print(f"Global accuracy: {100 * correct / total:.2f}%")
-            if supervised:
-                print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
+            print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
             for j in range(k):
                 print(f"Seed {j} accuracy : {100 * seeds_correct[j] / total:.2f}%")
 
             history["classif"].append(100 * correct / total)
             for j in range(k):
                 history[f"classif {j}"].append(100 * seeds_correct[j] / total)
-            if supervised:
-                history[f"sup classif"].append(100 * correct_sup / total)
+            history[f"sup classif"].append(100 * correct_sup / total)
             history["loss_sigreg"].append(running_sigreg / total)
             history["loss_jepa"].append(running_jepa / total)
             history["loss_label"].append(running_label / total)

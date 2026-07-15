@@ -933,19 +933,17 @@ class QueryBlock(nn.Module):
         z_norm =  self.query_norm(z)
         h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
         
-        if residual:
+        if True:
             h_pos = z_norm + h_pos
             #pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
             pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
-            if pos_guess:
-                if residual:
-                    h_pos = z_norm + h_label   # label cross-attn + pos residual
-                    pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
-                else:
-                    pos_out      = self.query_ffn(self.query_norm_ffn(h_label))  
-            else:
-                pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            #if pos_guess:
+            #    h_pos = z_norm + h_label   # label cross-attn + pos residual
+            #    pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
+            #    #pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
+            #else:
+            pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
@@ -953,7 +951,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
                  normalize=False, n_classes=1000, frozen_emb = True, residual=False, l_emb_detach=False,
-                 label_smoothing=0.1, full_residual=False):
+                 label_smoothing=0.1, label_mask = 0.8, full_residual=False):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
@@ -997,13 +995,14 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         self.norm_seeds = nn.LayerNorm(emb_dim)
         self.norm_label = nn.LayerNorm(emb_dim)
         self.norm_pos = nn.LayerNorm(emb_dim)
+        self.label_mask = label_mask
 
     def forward(self, views, labels, z):
         B = views.size(0)
         seeds = self.seeds.expand(B, -1, -1).clone()
 
         if labels is not None and self.training:
-            mask   = torch.rand(B, device=views.device) < 0.8
+            mask   = torch.rand(B, device=views.device) < self.label_mask
             l_emb  = self.label_embedding(labels)  # (B, emb_dim)
             cls    = self.cls_token.expand(B, -1, -1).squeeze(1)
             l_emb  = torch.where(mask.unsqueeze(1), cls, l_emb)
@@ -1027,7 +1026,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         for idx_block, block in enumerate(self.blocks):
             
             if z == None: # position guess
-                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block, pos_guess=True)   
+                views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block) #, pos_guess=True)   
                 #pos = l_emb
             else:
                 views, seeds, l_emb, pos, attn_label, attn_pos = block(views, seeds, l_emb, pos, idx_block)  
