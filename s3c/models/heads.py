@@ -939,9 +939,11 @@ class QueryBlock(nn.Module):
             pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
             if pos_guess:
-                h_pos = z_norm + h_label   # label cross-attn + pos residual
-                pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
-                #pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
+                if residual:
+                    h_pos = z_norm + h_label   # label cross-attn + pos residual
+                    pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
+                else:
+                    pos_out      = self.query_ffn(self.query_norm_ffn(h_label))  
             else:
                 pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 

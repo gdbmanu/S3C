@@ -19,6 +19,7 @@ class ShiftZoomUplet:
 
     def shift_zoom(self, img, x, y):
         w, h = img.size
+        size_ref = min(w, h)
         w_zoomed   = int(w * self.zoom)
         h_zoomed   = int(h * self.zoom)
         zoomed_ref = min(w_zoomed, h_zoomed)   # petit côté zoomé — référence du shift
@@ -33,10 +34,10 @@ class ShiftZoomUplet:
         cy = h_zoomed / 2 + zoomed_ref * y_prim / 2 #zoomed_ref / 2 * (1 + y / 2)
 
         # crop de taille originale (w, h) centré en (cx, cy)
-        left   = int(cx - w / 2)
-        top    = int(cy - h / 2)
-        right  = left + w
-        bottom = top  + h
+        left   = int(cx - size_ref/2) #w / 2)
+        top    = int(cy - size_ref/2) #h / 2)
+        right  = left + size_ref #w
+        bottom = top  + size_ref #h
 
         # padding reflect uniquement si on dépasse l'image zoomée réelle
         pl = max(0, -left);             
@@ -50,7 +51,7 @@ class ShiftZoomUplet:
         left += pl
         top  += pt
 
-        return img_zoomed.crop((left, top, left + w, top + h))
+        return img_zoomed.crop((left, top, left + size_ref, top + size_ref)) #left + w, top + h))
 
     def __call__(self, img):
         """

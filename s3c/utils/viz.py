@@ -233,4 +233,4 @@ def compute_saliency_grid(
     saliency = torch.sum(z_y_batch_norm * z2_norm, dim=-1)                       # (121,)
     saliency = saliency.reshape(grid_size, grid_size)                  # (11, 11)
 
-    return z1_ref, z2, saliency #saliency, grid, z_y_batch.reshape(grid_size, grid_size, -1), z2
+    return z1_ref, z_y_batch, z2, saliency #saliency, grid, z_y_batch.reshape(grid_size, grid_size, -1), z2
