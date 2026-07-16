@@ -31,7 +31,7 @@ from torchvision.models import ResNet50_Weights
 from s3c.models.heads import IterativeSeedTransformerwithQuery, IterativeSeedTransformerwithSimpleQuery, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.utils.training import sigreg, vicReg_seed #SIGReg
-from s3c.models.heads import  ABMILPosPredictor, ABMILLabelPredictor, PosPredictor
+from s3c.models.heads import  ABMILPosPredictor, ABMILLabelPredictor, PosPredictor, ABMILSeedProjector
 from s3c.utils.training import get_parent_synset
 
 import timm
@@ -102,6 +102,7 @@ else:
 inv_temp = 1
 stop_gradient = False
 
+
 test = True # seed diversity
 center_test = False # center seed consistency
 vicreg = False # more seed diversity
@@ -111,12 +112,12 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-residual = True
+residual = True #False # 
 if residual:
-    full_residual = False # True #
+    full_residual = False # 
 l_emb_detach = False
 if supervised:
-    label_smoothing = 0.5
+    label_smoothing = 0.8
 else:
     label_smoothing = 0.1
 use_synset_embeddings = True # False # 
@@ -126,6 +127,8 @@ simple = False
 
 abmil_pos = True
 abmil_label = False
+abmil_seed = True
+
 
 suffix = ""
 if supervised : 
@@ -178,7 +181,8 @@ if use_synset_embeddings:
 
 if simple:
     suffix = suffix + '_SIMPLE'
-    
+
+if abmil_seed: suffix = suffix + '_ASEED'
 if abmil_pos : suffix = suffix + "_APOS2"
 if abmil_label : suffix = suffix + "_ALAB2"
 
@@ -362,16 +366,19 @@ else:
                     nn.Linear(embed_dim, 1000),
                 )
 
-seeds_mlp = nn.Sequential(
-    nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
-    nn.LayerNorm(embed_dim),                  # norm par seed ✓
-    nn.Flatten(1),                            # (B, k, d) → (B, k*d)
-    nn.Linear(k * embed_dim, k * embed_dim),
-    nn.ReLU(),
-    nn.Linear(k * embed_dim, k * embed_dim),
-    nn.ReLU(),
-    nn.Linear(k * embed_dim, bottleneck_dim),
-)
+if abmil_seed:
+    seeds_mlp = ABMILSeedProjector()
+else:
+    seeds_mlp = nn.Sequential(
+        nn.Unflatten(1, (k, embed_dim)),          # (B, k*d) → (B, k, d)
+        nn.LayerNorm(embed_dim),                  # norm par seed ✓
+        nn.Flatten(1),                            # (B, k, d) → (B, k*d)
+        nn.Linear(k * embed_dim, k * embed_dim),
+        nn.ReLU(),
+        nn.Linear(k * embed_dim, k * embed_dim),
+        nn.ReLU(),
+        nn.Linear(k * embed_dim, bottleneck_dim),
+    )
 
 if k>1:                                     # cross-draws integration (seed diversity)
     # LINEAR PROBES
@@ -421,13 +428,13 @@ if curriculum or finetune:
     print("❗ Paramètres manquants :", missing)
     print("⚠️ Paramètres inattendus :", unexpected)
 
-    '''if "seeds_mlp" not in checkpoint:
+    """if "seeds_mlp" not in checkpoint:
         raise KeyError(f"Aucune clé 'seeds_mlp' trouvée dans {checkpoint_path}")
     state_dict = checkpoint["seeds_mlp"]
     missing, unexpected = seeds_mlp.load_state_dict(state_dict, strict=False)
     print("➡️ Poids chargés (seeds_mlp).")
     print("❗ Paramètres manquants :", missing)
-    print("⚠️ Paramètres inattendus :", unexpected)'''
+    print("⚠️ Paramètres inattendus :", unexpected)"""
 
 if pos_supervised:
     z_linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
@@ -664,7 +671,7 @@ for epoch in range(train_epochs):
                 centers = output_t.mean(dim=1)
 
             seed_centers = centers[:,:k,:]
-            z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+            z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
             
             l_emb_center = centers[:,k,:] #.view(batch_size, embed_dim)
 
@@ -692,7 +699,7 @@ for epoch in range(train_epochs):
             if n_student_draws > 0:
                 z_draws = []
                 for i in range(n_student_draws):
-                    z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
+                    z_draw, _ = seeds_mlp(output_s[:,i,:k,:]) #.view(batch_size, k*embed_dim))
                     if stop_gradient:
                         loss_jepa += mse(z_draw, z_center.detach())
                     else:
@@ -855,9 +862,14 @@ for epoch in range(train_epochs):
                         labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
 
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        if n_student_draws > 0:
-                            output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
-                        output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
+                        if pos_supervised:
+                            if n_student_draws > 0:
+                                output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, None) for i in range(n_student_draws)], dim=1)
+                            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, None) for i in range(n_teacher_draws)], dim=1)
+                        else:
+                            if n_student_draws > 0:
+                                output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, z_probe) for i in range(n_student_draws)], dim=1)
+                            output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], None, z_probe) for i in range(n_teacher_draws)], dim=1)
                         
                         if supervised:
                             if pos_supervised:
@@ -891,13 +903,13 @@ for epoch in range(train_epochs):
 
 
                         seed_centers = centers[:,:k:]
-                        z_center = seeds_mlp(seed_centers.view(batch_size, k*embed_dim))
+                        z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
                         l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
                         pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
 
                         if supervised:
                             seed_centers_sup = centers_sup[:,:k,:]
-                            z_center_sup = seeds_mlp(seed_centers_sup.view(batch_size, k*embed_dim))
+                            z_center_sup, _ = seeds_mlp(seed_centers_sup) #.view(batch_size, k*embed_dim))
                             l_emb_center_sup = centers_sup[:,k,:].view(batch_size, embed_dim)
                             pos_center_sup = centers_sup[:,k+1,:].view(batch_size, embed_dim)
 
@@ -922,7 +934,7 @@ for epoch in range(train_epochs):
                         if n_student_draws > 0:
                             z_draws = []
                             for i in range(n_student_draws):
-                                z_draw = seeds_mlp(output_s[:,i,:k,:].view(batch_size, k*embed_dim))
+                                z_draw, _ = seeds_mlp(output_s[:,i,:k,:]) #.view(batch_size, k*embed_dim))
                                 if stop_gradient:
                                     loss_jepa += mse(z_draw, z_center.detach())
                                 else:

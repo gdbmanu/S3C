@@ -72,6 +72,68 @@ class PosPredictor(nn.Module):
         h_flat = torch.cat(hs, dim=-1)            # (B, k*hidden_dim)
         return self.head(h_flat)                  # (B, out_dim)
 
+class ABMILSeedProjector(nn.Module):
+    """
+    Produit un embedding à partir des k seeds
+    (pour LeJepa Loss)
+
+    Poids et LayerNorm DISTINCTS par seed.
+
+    s : (B, k, emb_dim)  — seeds
+
+    Logique ABMIL dans la couche intermédiaire
+    """
+    def __init__(self, emb_dim=768, k=1, hidden_dim=768 * 2, out_dim=768):
+        super().__init__()
+        self.k = k
+
+        # LayerNorm distinct par seed
+        self.norm_s = nn.ModuleList([
+            nn.LayerNorm(emb_dim) for _ in range(k)
+        ])
+
+        self.attn = nn.Sequential(
+            nn.Linear(emb_dim, 256),   # ← 2*emb_dim au lieu de emb_dim
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )
+
+        self.seed_transform = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(emb_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, emb_dim),
+            )
+            for _ in range(k)
+        ])
+
+        self.head = nn.Sequential(
+                nn.Linear(emb_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, out_dim),
+            )
+        
+
+    def forward(self, s):
+        # s : (B, k, emb_dim)
+        # z : (B, emb_dim)
+
+        if s.dim() == 2:
+            s = s.unsqueeze(1)   # (B, emb_dim) → (B, 1, emb_dim)
+
+        s_trans = torch.stack([
+                                self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
+                            ], dim=1)   # (B, k, emb_dim)
+        
+        # Concaténer z à chaque seed pour le calcul des scores
+
+        # ABMIL conditionné sur z
+        w = self.attn(s)                                  # (B, k, 1)
+        w = torch.softmax(w, dim=1)
+        h = (w * s_trans).sum(dim=1)
+
+        return self.head(h), w
+
 
 class ABMILPosPredictor(nn.Module):
     """
@@ -850,8 +912,8 @@ class QueryBlock(nn.Module):
         self.query_cross_attn = nn.MultiheadAttention(
             emb_dim, n_heads, dropout=dropout, batch_first=True
         )
-
-        self.query_norm_ffn = nn.LayerNorm(emb_dim)
+        
+        """self.query_norm_ffn = nn.LayerNorm(emb_dim)
 
         self.query_ffn = nn.Sequential(
             nn.Linear(emb_dim, 4 * emb_dim),
@@ -859,10 +921,9 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(4 * emb_dim, emb_dim),
             nn.Dropout(dropout),
-        )
+        )"""
 
 
-        '''
         # FFN sur le token label après cross-attention
         self.label_norm_ffn = nn.LayerNorm(emb_dim)
         
@@ -886,7 +947,7 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(4 * emb_dim, emb_dim),
             nn.Dropout(dropout),
-        )'''
+        )
 
         self.n_blocks = n_blocks
         self.residual = residual
@@ -917,6 +978,7 @@ class QueryBlock(nn.Module):
                 residual = block_idx < self.n_blocks - 1
         else:
             residual = False
+
         if self.l_emb_detach:
             h_label, attn_label = self.query_cross_attn(l_norm.detach(), kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
         else:
@@ -924,26 +986,27 @@ class QueryBlock(nn.Module):
         
         if residual:
             h_label = l_norm + h_label
-            #label_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
-            label_out      = h_label + self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            label_out      = h_label + self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)
+            #label_out      = h_label + self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)
         else:
-            #label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
-            label_out      = self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+            label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
+            #label_out      = self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
         z_norm =  self.query_norm(z)
         h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
         
-        if True:
+        if True:  ## !! TODO
             h_pos = z_norm + h_pos
-            #pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
-            pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            pos_out      = h_pos + self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            #pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
         else:
             #if pos_guess:
             #    h_pos = z_norm + h_label   # label cross-attn + pos residual
             #    pos_out      = h_pos + self.query_ffn(self.query_norm_ffn(h_pos))
             #    #pos_out      = self.pos_ffn(self.pos_norm_ffn(h_label))  
             #else:
-            pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            #pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+            pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
