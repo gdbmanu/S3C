@@ -865,7 +865,8 @@ class QueryBlock(nn.Module):
     """
 
     def __init__(self, emb_dim=768, n_heads=12, 
-                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, l_emb_detach=False, n_blocks=2):
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 cross_query=True, l_emb_detach=False, n_blocks=2):
         super().__init__()
 
         ## VIEWS
@@ -913,17 +914,7 @@ class QueryBlock(nn.Module):
             emb_dim, n_heads, dropout=dropout, batch_first=True
         )
         
-        """self.query_norm_ffn = nn.LayerNorm(emb_dim)
-
-        self.query_ffn = nn.Sequential(
-            nn.Linear(emb_dim, 4 * emb_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(4 * emb_dim, emb_dim),
-            nn.Dropout(dropout),
-        )"""
-
-
+        
         # FFN sur le token label après cross-attention
         self.label_norm_ffn = nn.LayerNorm(emb_dim)
         
@@ -949,6 +940,23 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
+        if self.cross_query:
+            self.query_out_norm = nn.LayerNorm(emb_dim)
+            self.query_self_attn = nn.MultiheadAttention(
+                emb_dim, n_heads, dropout=dropout, batch_first=True
+            )
+        
+            self.query_norm_ffn = nn.LayerNorm(emb_dim)
+
+            self.query_ffn = nn.Sequential(
+                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(4 * emb_dim, emb_dim),
+                nn.Dropout(dropout),
+            )
+
+
         self.n_blocks = n_blocks
         self.residual = residual
         self.l_emb_detach = l_emb_detach
@@ -967,6 +975,8 @@ class QueryBlock(nn.Module):
         h_seeds, _ = self.seed_cross_attn(s, self.cross_v_norm(v), self.cross_v_norm(v))
         s = s + h_seeds 
         s = s + self.seed_ffn(self.seed_norm_ffn(s))
+
+        # ── 3. requetes lisent les seeds ─────────────────────
 
         l_norm  = self.query_norm(l_emb)
         kv_norm = self.kv_norm(s)
@@ -1007,6 +1017,16 @@ class QueryBlock(nn.Module):
             #else:
             #pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
             pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
+        
+        # ── 4. self-attention des requetes ─────────────────────
+        if self.cross_query:
+            query_out = torch.stack([label_out, pos_out], dim=1)
+            q = self.query_out_norm(query_out)
+            h_q, _ = self.query_self_attn(q, q, q)
+            q = q + h_q
+            q = q + self.view_ffn(self.view_norm_ffn(q))
+            label_out = q[:,0,:].unsqueeze(1)
+            pos_out = q[:,1,:].unsqueeze(1)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
@@ -1014,7 +1034,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
                  normalize=False, n_classes=1000, frozen_emb = True, residual=False, l_emb_detach=False,
-                 label_smoothing=0.1, label_mask = 0.8, full_residual=False):
+                 label_smoothing=0.1, label_mask = 0.8, pos_mask=0.5, full_residual=False, cross_query=True):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label
@@ -1048,22 +1068,26 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         if frozen_emb:
             self.label_embedding.weight.requires_grad = False
         self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+        self.pos_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
         
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
         self.blocks = nn.ModuleList([
             QueryBlock(emb_dim, n_heads, n_blocks=n_blocks, 
-                       residual=residual, l_emb_detach=l_emb_detach, full_residual=full_residual) for _ in range(n_blocks)
+                       residual=residual, l_emb_detach=l_emb_detach, 
+                       full_residual=full_residual, cross_query=True) for _ in range(n_blocks)
         ])
         self.normalize = normalize
         self.norm_seeds = nn.LayerNorm(emb_dim)
         self.norm_label = nn.LayerNorm(emb_dim)
         self.norm_pos = nn.LayerNorm(emb_dim)
         self.label_mask = label_mask
+        self.pos_mask = pos_mask
 
     def forward(self, views, labels, z):
         B = views.size(0)
         seeds = self.seeds.expand(B, -1, -1).clone()
 
+        # LABELS pre-processing
         if labels is not None and self.training:
             mask   = torch.rand(B, device=views.device) < self.label_mask
             l_emb  = self.label_embedding(labels)  # (B, emb_dim)
@@ -1080,11 +1104,19 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
         
         l_emb = self.pre_label_ffn(self.pre_norm_l(l_emb)).unsqueeze(1)
-        if z == None: # position guess
-            pos = l_emb #
-            #pos = self.pre_label_ffn(self.pre_norm_l(self.cls_token.expand(B, -1, -1).squeeze(1))).unsqueeze(1)
-        else:
-            pos = self.pre_pos_ffn(self.pre_norm_z(z)).unsqueeze(1)
+
+        # POS pre-processing
+        if z is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < self.pos_mask
+            pos_tk    = self.pos_token.expand(B, -1, -1).squeeze(1)
+            pos  = torch.where(mask.unsqueeze(1), pos_tk, z)
+        elif z is not None:
+            pos = z
+        else: # position guess
+            pos = self.pos_token.expand(B, -1, -1).squeeze(1)
+            # pos=l_emb
+            # pos = self.pre_label_ffn(self.pre_norm_l(self.cls_token.expand(B, -1, -1).squeeze(1))).unsqueeze(1)
+        pos = self.pre_pos_ffn(self.pre_norm_z(pos)).unsqueeze(1)
 
         for idx_block, block in enumerate(self.blocks):
             

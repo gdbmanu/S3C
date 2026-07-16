@@ -112,9 +112,9 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-residual = True #False # 
+residual = True # False # 
 if residual:
-    full_residual = False # 
+    full_residual = True # False
 l_emb_detach = False
 if supervised:
     label_smoothing = 0.8
@@ -125,7 +125,7 @@ synset_level = 4
 index_embeddings = False
 simple = False
 
-abmil_pos = True
+abmil_pos = False
 abmil_label = False
 abmil_seed = True
 
@@ -348,7 +348,25 @@ draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
 if abmil_pos:
     pos_predictor = ABMILPosPredictor(embed_dim, k)
 else:
-    pos_predictor = PosPredictor(embed_dim, k)
+    #pos_predictor = PosPredictor(embed_dim, k)
+    '''pos_predictor = nn.Sequential(
+                nn.LayerNorm(embed_dim),  
+                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(4 * emb_dim, emb_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(emb_dim, 256),
+                nn.GELU(),
+                nn.Linear(256, 2),
+            )'''
+    pos_predictor = nn.Sequential(
+                nn.LayerNorm(embed_dim),  
+                nn.Linear(emb_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 2),
+            )
 
 # LINEAR PROBE
 
@@ -618,7 +636,8 @@ for epoch in range(train_epochs):
             i_star = correct_logits.argmax(dim=1)                            # (B,)
             # coordonnées
             x_star = sxs[torch.arange(batch_size),  i_star]                          # (B,)
-            y_star = sys_[torch.arange(batch_size), i_star]                           # (B,)
+            y_star = sys_[torch.arange(batch_size), i_star]  
+            z_star = features[[torch.arange(batch_size), i_star, :] ]                         # (B,)
 
         # Génère des indices aléatoires pour chaque échantillon du batch
         # Shape : (batch_size, k)
@@ -646,8 +665,8 @@ for epoch in range(train_epochs):
             if supervised:
                 if pos_supervised:
                     if n_student_draws > 0:
-                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, None) for i in range(n_student_draws)], dim=1)
-                    output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, None) for i in range(n_teacher_draws)], dim=1)
+                        output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, z_star) for i in range(n_student_draws)], dim=1)
+                    output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_star) for i in range(n_teacher_draws)], dim=1)
                 else:
                     if n_student_draws > 0:
                         output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, z_probe) for i in range(n_student_draws)], dim=1)
@@ -733,7 +752,7 @@ for epoch in range(train_epochs):
                 if abmil_pos:
                     pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                 else:
-                    pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
+                    pos_pred = pos_predictor(pos_center)     
                 if abmil_label:
                     output_t_head, _ = linear_head(seed_centers[:,:k,:], l_emb_center)
                 else:
@@ -754,7 +773,7 @@ for epoch in range(train_epochs):
                 if abmil_pos:
                     pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                 else:
-                    pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
+                    pos_pred = pos_predictor(pos_center)     
                 
                 pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                 loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -840,6 +859,7 @@ for epoch in range(train_epochs):
                         # coordonnées
                         x_star = sxs[torch.arange(batch_size), i_star]                          # (B,)
                         y_star = sys_[torch.arange(batch_size), i_star]                           # (B,)
+                        z_star = features[torch.arange(batch_size), i_star, :]                           # (B,)
 
                     perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
 
@@ -873,7 +893,7 @@ for epoch in range(train_epochs):
                         
                         if supervised:
                             if pos_supervised:
-                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, None) for i in range(n_teacher_draws)], dim=1)
+                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_star) for i in range(n_teacher_draws)], dim=1)
                             else:
                                 output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
                                 # Oracle output
@@ -969,8 +989,8 @@ for epoch in range(train_epochs):
                                 pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                                 pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
                             else:
-                                pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
-                                pos_pred_sup = pos_predictor(seed_centers_sup, pos_center_sup)     
+                                pos_pred = pos_predictor(pos_center)     
+                                pos_pred_sup = pos_predictor(pos_center_sup)     
                             if abmil_label:
                                 output_t_head, _ = linear_head(seed_centers[:,:k,:], l_emb_center)
                                 output_t_head_sup, _ = linear_head(seed_centers_sup, l_emb_center_sup)
@@ -992,8 +1012,8 @@ for epoch in range(train_epochs):
                                 pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
                                 pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
                             else:
-                                pos_pred = pos_predictor(seed_centers[:,:k,:], pos_center)     
-                                pos_pred_sup = pos_predictor(seed_centers_sup, pos_center_sup)     
+                                pos_pred = pos_predictor(pos_center)     
+                                pos_pred_sup = pos_predictor(pos_center_sup)     
                             
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)
                             loss_pos = F.mse_loss(pos_pred, pos_target)
@@ -1009,10 +1029,12 @@ for epoch in range(train_epochs):
                         ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
                         print(f"ratio sigreg/jepa = {ratio:.2f}")
                         if pos_supervised:
-                            print(f"pos target : ({x_star[0].item():.2f},{y_star[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
+                            print(f"pos target : ({x_star[0].item():.2f},{y_star[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}), pos_pred_sup ({pos_pred_sup[0,0].item():.2f},{pos_pred_sup[0,1].item():.2f}) ")
                         else:
                             print(f"pos target : ({x_probe[0].item():.2f},{y_probe[0].item():.2f}), pos_pred ({pos_pred[0,0].item():.2f},{pos_pred[0,1].item():.2f}) ")
                         print(f"pos error = {np.sqrt(loss_pos.item()):.2f}")
+                        if pos_supervised:
+                            print(f"pos sup error = {np.sqrt(loss_pos_sup.item()):.2f}")
                         
                         if cross_integration:
                             if k>1:
