@@ -125,7 +125,7 @@ synset_level = 4
 index_embeddings = False
 simple = False
 
-abmil_pos = False
+abmil_pos = True
 abmil_label = False
 abmil_seed = True
 
@@ -140,7 +140,7 @@ if supervised :
             suffix = suffix + "_SUP"
     suffix = suffix + f"_a{alpha}"
     if beta != 1e-4 : suffix = suffix + f"_b{beta}"
-    label_mask = 0.8
+    label_mask = 0.5
 else:
     pure = False
     label_mask = 0.2
@@ -893,7 +893,7 @@ for epoch in range(train_epochs):
                         
                         if supervised:
                             if pos_supervised:
-                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_star) for i in range(n_teacher_draws)], dim=1)
+                                output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, None) for i in range(n_teacher_draws)], dim=1)
                             else:
                                 output_t_sup = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, z_probe) for i in range(n_teacher_draws)], dim=1)
                                 # Oracle output

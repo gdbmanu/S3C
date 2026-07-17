@@ -901,17 +901,35 @@ class QueryBlock(nn.Module):
             nn.Linear(4 * emb_dim, emb_dim), nn.Dropout(dropout),
         )
 
+        self.cross_query = cross_query
+        if self.cross_query:
+            self.query_in_norm = nn.LayerNorm(emb_dim)
+            self.query_out_norm = nn.LayerNorm(emb_dim)
+            self.query_self_attn = nn.MultiheadAttention(
+                emb_dim, n_heads, dropout=dropout, batch_first=True
+            )
+        
+            self.query_norm_ffn = nn.LayerNorm(emb_dim)
+
+            self.query_ffn = nn.Sequential(
+                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(4 * emb_dim, emb_dim),
+                nn.Dropout(dropout),
+            )
+
         ## LABELS
 
         # Norms Pre-LN
         #self.label_norm  = nn.LayerNorm(emb_dim)   # sur le token label
         #self.pos_norm  = nn.LayerNorm(emb_dim)   # sur le token label
 
-        self.query_norm  = nn.LayerNorm(emb_dim)
+        self.label_norm  = nn.LayerNorm(emb_dim)
         self.kv_norm = nn.LayerNorm(emb_dim)   # sur les seeds
 
         # Cross-attention : query (Q) × seeds (K, V)
-        self.query_cross_attn = nn.MultiheadAttention(
+        self.label_cross_attn = nn.MultiheadAttention(
             emb_dim, n_heads, dropout=dropout, batch_first=True
         )
         
@@ -930,7 +948,10 @@ class QueryBlock(nn.Module):
         ## POS
 
         # Norms Pre-LN
-
+        self.pos_norm  = nn.LayerNorm(emb_dim)
+        self.pos_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
         self.pos_norm_ffn = nn.LayerNorm(emb_dim)
 
         self.pos_ffn = nn.Sequential(
@@ -941,23 +962,7 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-        self.cross_query = cross_query
-        if self.cross_query:
-            self.query_in_norm = nn.LayerNorm(emb_dim)
-            self.query_out_norm = nn.LayerNorm(emb_dim)
-            self.query_self_attn = nn.MultiheadAttention(
-                emb_dim, n_heads, dropout=dropout, batch_first=True
-            )
         
-            self.query_norm_ffn = nn.LayerNorm(emb_dim)
-
-            self.query_ffn = nn.Sequential(
-                nn.Linear(emb_dim, 4 * emb_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(4 * emb_dim, emb_dim),
-                nn.Dropout(dropout),
-            )
 
         self.n_blocks = n_blocks
         self.residual = residual
@@ -980,8 +985,8 @@ class QueryBlock(nn.Module):
 
         # ── 3. self-attention des requetes ─────────────────────
 
-        l_norm  = self.query_norm(l_emb)
-        z_norm =  self.query_norm(z)
+        l_norm  = self.label_norm(l_emb)
+        z_norm =  self.pos_norm(z)
 
         if self.cross_query:
             q = torch.cat([l_norm, z_norm], dim=1)
@@ -1008,9 +1013,9 @@ class QueryBlock(nn.Module):
             residual = False
 
         if self.l_emb_detach:
-            h_label, attn_label = self.query_cross_attn(l_norm.detach(), kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+            h_label, attn_label = self.label_cross_attn(l_norm.detach(), kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
         else:
-            h_label, attn_label = self.query_cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
+            h_label, attn_label = self.label_cross_attn(l_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHAT PATHWAY
         
         if residual:
             h_label = l_norm + h_label
@@ -1022,7 +1027,7 @@ class QueryBlock(nn.Module):
 
         # POS
 
-        h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
+        h_pos, attn_pos = self.pos_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
         
         if True:  ## !! TODO
             h_pos = z_norm + h_pos
