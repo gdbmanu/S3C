@@ -114,7 +114,7 @@ if finetune:
 
 residual = True # False # 
 if residual:
-    full_residual = True # False
+    full_residual = False # True # 
 l_emb_detach = False
 if supervised:
     label_smoothing = 0.8
@@ -351,19 +351,19 @@ else:
     #pos_predictor = PosPredictor(embed_dim, k)
     '''pos_predictor = nn.Sequential(
                 nn.LayerNorm(embed_dim),  
-                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.Linear(embed_dim, 4 * embed_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(4 * emb_dim, emb_dim),
+                nn.Linear(4 * embed_dim, embed_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(emb_dim, 256),
+                nn.Linear(embed_dim, 256),
                 nn.GELU(),
                 nn.Linear(256, 2),
             )'''
     pos_predictor = nn.Sequential(
                 nn.LayerNorm(embed_dim),  
-                nn.Linear(emb_dim, 256),
+                nn.Linear(embed_dim, 256),
                 nn.ReLU(),
                 nn.Linear(256, 2),
             )
@@ -637,7 +637,7 @@ for epoch in range(train_epochs):
             # coordonnées
             x_star = sxs[torch.arange(batch_size),  i_star]                          # (B,)
             y_star = sys_[torch.arange(batch_size), i_star]  
-            z_star = features[[torch.arange(batch_size), i_star, :] ]                         # (B,)
+            z_star = features[torch.arange(batch_size), i_star, :]                          # (B,)
 
         # Génère des indices aléatoires pour chaque échantillon du batch
         # Shape : (batch_size, k)

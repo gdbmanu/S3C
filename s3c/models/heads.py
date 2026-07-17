@@ -906,6 +906,7 @@ class QueryBlock(nn.Module):
         # Norms Pre-LN
         #self.label_norm  = nn.LayerNorm(emb_dim)   # sur le token label
         #self.pos_norm  = nn.LayerNorm(emb_dim)   # sur le token label
+
         self.query_norm  = nn.LayerNorm(emb_dim)
         self.kv_norm = nn.LayerNorm(emb_dim)   # sur les seeds
 
@@ -940,7 +941,9 @@ class QueryBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
+        self.cross_query = cross_query
         if self.cross_query:
+            self.query_in_norm = nn.LayerNorm(emb_dim)
             self.query_out_norm = nn.LayerNorm(emb_dim)
             self.query_self_attn = nn.MultiheadAttention(
                 emb_dim, n_heads, dropout=dropout, batch_first=True
@@ -955,7 +958,6 @@ class QueryBlock(nn.Module):
                 nn.Linear(4 * emb_dim, emb_dim),
                 nn.Dropout(dropout),
             )
-
 
         self.n_blocks = n_blocks
         self.residual = residual
@@ -976,10 +978,26 @@ class QueryBlock(nn.Module):
         s = s + h_seeds 
         s = s + self.seed_ffn(self.seed_norm_ffn(s))
 
-        # ── 3. requetes lisent les seeds ─────────────────────
+        # ── 3. self-attention des requetes ─────────────────────
 
         l_norm  = self.query_norm(l_emb)
+        z_norm =  self.query_norm(z)
+
+        if self.cross_query:
+            q = torch.cat([l_norm, z_norm], dim=1)
+            q = self.query_in_norm(q)
+            h_q, _ = self.query_self_attn(q, q, q)
+            q = q + h_q
+            q = q + self.query_ffn(self.query_norm_ffn(q))
+            q = self.query_out_norm(q)
+            l_norm = q[:,0,:].unsqueeze(1)
+            z_norm = q[:,1,:].unsqueeze(1)
+
+        # ── 4. requetes lisent les seeds ─────────────────────
+        
         kv_norm = self.kv_norm(s)
+
+        # LABEL
 
         if self.residual:
             if self.full_residual:
@@ -1002,7 +1020,8 @@ class QueryBlock(nn.Module):
             label_out      = self.label_ffn(self.label_norm_ffn(h_label))                 # (B, 1, emb_dim)        
             #label_out      = self.query_ffn(self.query_norm_ffn(h_label))                 # (B, 1, emb_dim)        
 
-        z_norm =  self.query_norm(z)
+        # POS
+
         h_pos, attn_pos = self.query_cross_attn(z_norm, kv_norm, kv_norm)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)
         
         if True:  ## !! TODO
@@ -1017,16 +1036,6 @@ class QueryBlock(nn.Module):
             #else:
             #pos_out      = self.query_ffn(self.query_norm_ffn(h_pos))                 # (B, 1, emb_dim)
             pos_out      = self.pos_ffn(self.pos_norm_ffn(h_pos))                 # (B, 1, emb_dim)
-        
-        # ── 4. self-attention des requetes ─────────────────────
-        if self.cross_query:
-            query_out = torch.stack([label_out, pos_out], dim=1)
-            q = self.query_out_norm(query_out)
-            h_q, _ = self.query_self_attn(q, q, q)
-            q = q + h_q
-            q = q + self.view_ffn(self.view_norm_ffn(q))
-            label_out = q[:,0,:].unsqueeze(1)
-            pos_out = q[:,1,:].unsqueeze(1)
 
         return v, s, label_out, pos_out, attn_label, attn_pos
 
@@ -1074,7 +1083,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
         self.blocks = nn.ModuleList([
             QueryBlock(emb_dim, n_heads, n_blocks=n_blocks, 
                        residual=residual, l_emb_detach=l_emb_detach, 
-                       full_residual=full_residual, cross_query=True) for _ in range(n_blocks)
+                       full_residual=full_residual, cross_query=cross_query) for _ in range(n_blocks)
         ])
         self.normalize = normalize
         self.norm_seeds = nn.LayerNorm(emb_dim)
