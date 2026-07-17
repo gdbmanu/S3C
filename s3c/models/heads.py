@@ -1048,7 +1048,7 @@ class IterativeSeedTransformerwithQuery(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
                  normalize=False, n_classes=1000, frozen_emb = True, residual=False, l_emb_detach=False,
-                 label_smoothing=0.1, label_mask = 0.8, pos_mask=0.5, full_residual=False, cross_query=True):
+                 label_smoothing=0.1, label_mask = 0.5, pos_mask=0.5, full_residual=False, cross_query=True):
         super().__init__()
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   # sur le token label

@@ -70,14 +70,14 @@ n_student_draws = 4
 n_teacher_draws = 3
 
 orig = False
-grid = False
+grid = True
 curriculum = False
-finetune = False
+finetune = True
 
 if grid:
     n_saccades_max = 121
-    n_uplet_student = 9
-    n_uplet_teacher = 18
+    n_uplet_student = 6
+    n_uplet_teacher = 15
     n_student_draws = 6
     n_teacher_draws = 3
 if finetune:
@@ -85,7 +85,7 @@ if finetune:
     n_teacher_draws = 1
 
 
-train_epochs = 30
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
@@ -157,7 +157,8 @@ if test3 : suffix = suffix + "_TEST3"
 if strict_global_step : suffix = suffix + "_STRICT"
 if cross_integration : suffix = suffix + "_CROSS"
 if curriculum or finetune:
-    load_dir = "../checkpoints/260630_ISTQ_3_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a3e-06_TEST_CROSS_RES_DETACH_SMOOTH_APOS2_s3_t5_space"
+    #load_dir = "../checkpoints/260630_ISTQ_3_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a3e-06_TEST_CROSS_RES_DETACH_SMOOTH_APOS2_s3_t5_space"
+    load_dir = "../checkpoints/260707_ISTQ_3_semi_z_lam0.05_mu_1_sab2_LeJ_SUP_a3e-06_TEST_CROSS_RES_DETACH_SMOOTH0.5_SYNSET_APOS2_s3_t5_space"
 if curriculum: suffix = suffix + "_CURRI"
 if finetune: 
     suffix = suffix + "_FINE"
@@ -248,7 +249,7 @@ val_loader = DataLoader(
 
 if use_synset_embeddings:
 
-    dataset = ImageFolder(root='~/data/Imagenet_full/val')
+    '''dataset = ImageFolder(root='~/data/Imagenet_full/val')
     wnids = list(dataset.class_to_idx.keys())   # ['n01440764', ...]
     wnids = sorted(wnids)                        # ordre alphabétique = ordre ImageNet standard
     print(len(wnids))   # 1000
@@ -278,7 +279,13 @@ if use_synset_embeddings:
 
     # Noms des synsets ordonnés par indice
     synset_names = sorted(parent_names.keys(), key=lambda x: parent_names[x])
-    print(synset_names[:100])
+    print(synset_names[:100])'''
+
+    data = torch.load('imagenet_synset_embeddings.pt')
+    label_to_synset_tensor = data['label_to_synset'].to(device)
+    n_synsets              = data['n_synsets']
+    synset_names           = data['synset_names']
+    synset_embeddings      = data['embeddings'].to(device)
 
     model, _ = clip.load("ViT-L/14")
     model.eval().cuda()
@@ -509,18 +516,22 @@ if supervised:
     if finetune:
         if train_epochs == 100:
             linear_optimizer = torch.optim.AdamW([
+                {'params': ist_transformer.parameters(), 'lr': 1e-6},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}
+                ],
                 weight_decay=3e-4, #0.04,  
             )
             
         else:
             linear_optimizer = torch.optim.AdamW([
+                {'params': ist_transformer.parameters(), 'lr': 3e-6},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-                {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+                #{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}
+            ],
                 weight_decay=1e-3, #0.04,  
             )
-        ist_transformer.requires_grad_(False)
+        #ist_transformer.requires_grad_(False)
     else:
         if train_epochs == 100:
             linear_optimizer = torch.optim.AdamW(
