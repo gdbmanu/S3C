@@ -923,7 +923,7 @@ for epoch in range(train_epochs):
                             centers_sup = output_t_sup.mean(dim=1)
 
 
-                        seed_centers = centers[:,:k:]
+                        seed_centers = centers[:,:k,:]
                         z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
                         l_emb_center = centers[:,k,:].view(batch_size, embed_dim)
                         pos_center = centers[:,k+1,:].view(batch_size, embed_dim)
@@ -988,13 +988,13 @@ for epoch in range(train_epochs):
                             #output_t_head = linear_head(z_center)
                             if abmil_pos:
                                 pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
-                                pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
+                                pos_pred_sup, _ = pos_predictor(seed_centers_sup[:,:k,:], pos_center_sup)
                             else:
                                 pos_pred = pos_predictor(pos_center)     
                                 pos_pred_sup = pos_predictor(pos_center_sup)     
                             if abmil_label:
                                 output_t_head, _ = linear_head(seed_centers[:,:k,:], l_emb_center)
-                                output_t_head_sup, _ = linear_head(seed_centers_sup, l_emb_center_sup)
+                                output_t_head_sup, _ = linear_head(seed_centers_sup[:,:k,:], l_emb_center_sup)
                             else:
                                 output_t_head = linear_head(l_emb_center) #seed_centers.view(batch_size, k * embed_dim))
                                 output_t_head_sup = linear_head(l_emb_center_sup) #seed_centers.view(batch_size, k * embed_dim))
@@ -1011,7 +1011,7 @@ for epoch in range(train_epochs):
                             #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                             if abmil_pos:
                                 pos_pred, _ = pos_predictor(seed_centers[:,:k,:], pos_center)
-                                pos_pred_sup, _ = pos_predictor(seed_centers_sup, pos_center_sup)
+                                pos_pred_sup, _ = pos_predictor(seed_centers_sup[:,:k,:], pos_center_sup)
                             else:
                                 pos_pred = pos_predictor(pos_center)     
                                 pos_pred_sup = pos_predictor(pos_center_sup)     

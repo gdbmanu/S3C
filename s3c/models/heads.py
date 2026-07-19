@@ -1147,6 +1147,169 @@ class IterativeSeedTransformerwithQuery(nn.Module):
             return torch.cat([seeds, l_emb, pos], dim=1) #seeds, l_emb, pos, attn_label, attn_pos
 
 
+class WhereBlock(nn.Module):
+    """
+    Un bloc = 
+      - cross-attention query → seeds (query lisent les seeds transformées)
+      - pas de self-attention sur les query
+    """
+
+    def __init__(self, emb_dim=768, n_heads=12, 
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 l_emb_detach=False, n_blocks=2):
+        super().__init__()
+
+        ## VIEWS
+
+        self.view_norm = nn.LayerNorm(emb_dim)
+
+        self.view_self_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.view_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.view_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## SEEDS
+
+        self.seed_norm = nn.LayerNorm(emb_dim)
+        self.cross_v_norm = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : seeds lisent les vues
+        self.seed_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.seed_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## EMBEDDINGS
+
+        self.z_norm  = nn.LayerNorm(emb_dim)
+        self.cross_s_norm = nn.LayerNorm(emb_dim)   # sur les seeds
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.z_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.z_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.z_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, views, seeds, z):
+        # ── Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        v = v + h_views
+        v = v + self.view_ffn(self.view_norm_ffn(v))
+
+        # ── Seeds lisent les vues transformées ─────────────────────
+        v_cross = self.cross_v_norm(v)
+        s = self.seed_norm(seeds)
+        h_seeds, _ = self.seed_cross_attn(s, v_cross, v_cross)
+        s = s + h_seeds 
+        s = s + self.seed_ffn(self.seed_norm_ffn(s))
+
+        # ── requetes lisent les seeds ─────────────────────
+        
+        s_cross = self.cross_s_norm(s)
+        z = self.z_norm(z)
+        h_z, attn_z = self.z_cross_attn(z, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        z = z + h_z
+        z = z + self.z_ffn(self.z_norm_ffn(z))                 # (B, 1, emb_dim)
+
+        return v, s, z, attn_z
+
+class WhereIterativeSeedTransformer(nn.Module):
+    def __init__(self, emb_dim=768,
+                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 n_classes=1000, frozen_emb = True, 
+                 label_smoothing=0.1, label_mask = 0.2):
+        super().__init__()
+
+        self.pre_norm  = nn.LayerNorm(emb_dim)   
+
+        self.pre_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(label_smoothing), # increase label embedding entropy
+        )
+
+        # Token label — embedding appris        
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+        else:
+            self.label_embedding = nn.Embedding(n_classes, emb_dim)
+            frozen_emb = False
+        # Optionnel : geler les embeddings  
+        if frozen_emb:
+            self.label_embedding.weight.requires_grad = False
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+        
+        self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
+        self.blocks = nn.ModuleList([
+            WhereBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+        ])
+
+        self.post_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout), # increase label embedding entropy
+        )
+
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.label_mask = label_mask
+
+    def forward(self, views, labels):
+        B = views.size(0)
+        seeds = self.seeds.expand(B, -1, -1).clone()
+
+        # LABELS pre-processing
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < self.label_mask
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls_, l_emb)
+        elif labels is not None:
+            l_emb = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
+        
+        l_emb = self.pre_ffn(self.pre_norm(l_emb)).unsqueeze(1)
+
+        for block in self.blocks:
+            views, seeds, l_emb, attn_pos = block(views, seeds, l_emb)  
+
+        return torch.cat([seeds, self.post_ffn(self.norm_out(l_emb))], dim=1) 
+    
+
 class DualPredictor(nn.Module):
     def __init__(self, emb_dim=768, hidden_dim=256):
         super().__init__()
