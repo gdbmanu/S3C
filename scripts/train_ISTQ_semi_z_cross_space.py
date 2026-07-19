@@ -72,7 +72,7 @@ n_teacher_draws = 3
 orig = False
 grid = True
 curriculum = False
-finetune = True
+finetune = False
 
 if grid:
     n_saccades_max = 121
@@ -270,7 +270,7 @@ if use_synset_embeddings:
         for idx, name in label_to_parent.items()
     }
 
-    print(f"1000 classes → {n_synsets} synsets de niveau {synset_level}")
+    
     # Tensor de mapping pour usage GPU
     label_to_synset_tensor = torch.tensor(
         [label_to_synset_idx[i] for i in range(1000)],
@@ -281,11 +281,12 @@ if use_synset_embeddings:
     synset_names = sorted(parent_names.keys(), key=lambda x: parent_names[x])
     print(synset_names[:100])'''
 
-    data = torch.load('imagenet_synset_embeddings.pt')
+    data = torch.load(f'imagenet_synset_{synset_level}_embeddings.pt')
     label_to_synset_tensor = data['label_to_synset'].to(device)
     n_synsets              = data['n_synsets']
     synset_names           = data['synset_names']
     synset_embeddings      = data['embeddings'].to(device)
+    print(f"1000 classes → {n_synsets} synsets de niveau {synset_level}")
 
     model, _ = clip.load("ViT-L/14")
     model.eval().cuda()
