@@ -74,7 +74,6 @@ grid = False
 curriculum = False
 finetune = False
 
-
 if grid:
     n_saccades_max = 121
     n_uplet_student = 9
@@ -112,9 +111,11 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-residual = True # False # 
+residual = False #True # 
 if residual:
     full_residual = False # True # 
+else:
+    full_residual = False
 l_emb_detach = False
 if supervised:
     label_smoothing = 0.8
@@ -125,7 +126,7 @@ synset_level = 4
 index_embeddings = False
 simple = False
 
-abmil_pos = True
+abmil_pos = False
 abmil_label = False
 abmil_seed = True
 
