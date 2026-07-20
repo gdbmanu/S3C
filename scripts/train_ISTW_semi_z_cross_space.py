@@ -68,7 +68,7 @@ n_uplet_teacher = 5
 n_student_draws = 4
 n_teacher_draws = 3
 
-orig = False
+orig = True
 grid = False
 curriculum = False
 finetune = False
