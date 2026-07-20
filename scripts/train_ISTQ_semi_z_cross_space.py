@@ -608,8 +608,6 @@ if schedule:
         scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[n_warm])
 
 
-# %%
-
 log_interval = 100
 
 history = {"epoch": [], "batch": [], "loss": [],

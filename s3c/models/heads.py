@@ -287,14 +287,24 @@ class TransformerPosPredictor(nn.Module):
 
 class ABMILLabelPredictor(nn.Module):
     def __init__(self, emb_dim=768, k=1, hidden_dim=768,
-                 n_classes=1000, label_emb_dim=32):
+                 n_classes=1000, use_embeddings = False, label_emb_dim=32):
         super().__init__()
         self.k = k
 
         # Embedding du label
-        self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+        self.use_embeddings = use_embeddings
+        if use_embeddings:
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.cls_token = nn.Parameter(torch.randn(1, label_emb_dim))
+        else:
+            label_emb_dim = emb_dim
+            self.label_transform = nn.Sequential(
+                                        nn.Linear(emb_dim, hidden_dim),
+                                        nn.ReLU(),
+                                        nn.Linear(hidden_dim, hidden_dim),
+                                    )
         self.norm_label = nn.LayerNorm(label_emb_dim)
-        self.cls_token = nn.Parameter(torch.randn(1, label_emb_dim))
+        
 
         # LayerNorm et projection par seed
         self.norm_s = nn.ModuleList([nn.LayerNorm(emb_dim) for _ in range(k)])
@@ -306,12 +316,6 @@ class ABMILLabelPredictor(nn.Module):
             )
             for _ in range(k)
         ])
-
-        """self.label_transform = nn.Sequential(
-                nn.Linear(label_emb_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-            )"""
 
         # ABMIL : seed (hidden_dim) + label (label_emb_dim)
         self.attn = nn.Sequential(
@@ -329,18 +333,20 @@ class ABMILLabelPredictor(nn.Module):
             s = s.unsqueeze(1)
 
         # ── Label encoding ────────────────────────────────────────────
-        if labels is not None and self.training:
-            mask = torch.rand(B, device=s.device) < 0.2
-            l_emb = self.norm_label(self.label_embedding(labels))
-            cls_exp = self.norm_label(self.cls_token.expand(B, -1))  # ← normalisé
-            l_emb = torch.where(mask.unsqueeze(1), cls_exp, l_emb)
-        elif labels is not None:
-            l_emb = self.norm_label(self.label_embedding(labels))
+        if self.use_embeddings:
+            if labels is not None and self.training:
+                mask = torch.rand(B, device=s.device) < 0.2
+                l_emb = self.norm_label(self.label_embedding(labels))
+                cls_exp = self.norm_label(self.cls_token.expand(B, -1))  # ← normalisé
+                l_emb = torch.where(mask.unsqueeze(1), cls_exp, l_emb)
+            elif labels is not None:
+                l_emb = self.norm_label(self.label_embedding(labels))
+            else:
+                l_emb = self.norm_label(self.cls_token.expand(B, -1))    # ← normalisé
         else:
-            l_emb = self.norm_label(self.cls_token.expand(B, -1))    # ← normalisé
+            l_emb = self.label_transform(self.norm_label(labels))
         # ── Projection des seeds ──────────────────────────────────────
         s_norm = torch.stack([
-            #self.seed_transform[i](self.norm_s[i](s[:, i, :]))
             self.norm_s[i](s[:, i, :])
             for i in range(self.k)
         ], dim=1)                                      # (B, k, hidden_dim)
@@ -357,7 +363,7 @@ class ABMILLabelPredictor(nn.Module):
             for i in range(self.k)
         ], dim=1)  
 
-        h = (w * s_norm).sum(dim=1)                    # (B, hidden_dim)
+        h = (w * s_trans).sum(dim=1)                    # (B, hidden_dim)
 
         # ── Combinaison + prédiction ──────────────────────────────────
 
