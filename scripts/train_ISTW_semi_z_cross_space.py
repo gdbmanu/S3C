@@ -68,8 +68,8 @@ n_uplet_teacher = 5
 n_student_draws = 4
 n_teacher_draws = 3
 
-orig = True
-grid = False
+orig = False
+grid = True
 curriculum = False
 finetune = False
 
@@ -84,11 +84,11 @@ if finetune:
     n_teacher_draws = 1
 
 
-train_epochs = 30
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = True # **label** supervised
+supervised = False # **label** supervised
 if supervised:
     pure = False
     alpha = 1e-6 #3e-7
@@ -116,7 +116,7 @@ if supervised:
     label_smoothing = 0.1
 else:
     label_smoothing = 0.1
-use_synset_embeddings =  True #False # 
+use_synset_embeddings = True # False # 
 synset_level = 4
 index_embeddings = True #False
 
