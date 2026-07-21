@@ -91,7 +91,7 @@ mu = 1               # spatial probe weight
 supervised = True # **label** supervised
 if supervised:
     pure = False
-    alpha = 1e-6 # #1e-5 #3e-7
+    alpha = 1e-5 #3e-7
     beta = 1e-4 #3e-5 #!! 
 else:
     pure = False
@@ -115,7 +115,7 @@ else:
     label_smoothing = 0.1
 use_synset_embeddings =  True #False # 
 synset_level = 4
-index_embeddings = False
+index_embeddings = True #False
 
 abmil_pos = True
 abmil_label = True
@@ -701,7 +701,15 @@ for epoch in range(train_epochs):
                     loss_seeds += criterion(output_t_seed, labels)
 
             if abmil_pos:
-                pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+                if epoch <= int(train_epochs * 1/3):
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+                elif epoch <= int(train_epochs * 2/3):
+                    if np.random.rand() < 0.5:
+                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+                    else:
+                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center) # !!! z_pos_center)
+                else:
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center)
             else:
                 pos_pred = pos_predictor(z_pos_center)   
 
@@ -710,7 +718,15 @@ for epoch in range(train_epochs):
 
             if supervised:
                 if abmil_label:
-                    output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
+                    if epoch <= int(train_epochs * 1/3):
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
+                    elif epoch <= int(train_epochs * 2/3):
+                        if np.random.rand() < 0.5:
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
+                        else:
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
+                    else:
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #z_pos_center) #
                 
