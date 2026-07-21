@@ -632,7 +632,7 @@ for epoch in range(train_epochs):
 
             if cross_integration:
                 center_seeds = []
-                for seed_idx in range(k+1):
+                for seed_idx in range(k):
                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
                     z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
                     center_seeds.append(z)
@@ -643,7 +643,8 @@ for epoch in range(train_epochs):
             seed_centers = centers[:,:k,:]
             z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
             
-            z_pos_center = centers[:,k,:] #.view(batch_size, embed_dim)
+            #z_pos_center = centers[:,k,:] #.view(batch_size, embed_dim)
+            z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
             loss_sigreg = torch.tensor(0.).to(device)
@@ -655,12 +656,6 @@ for epoch in range(train_epochs):
                             loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds                            
                         if not strict_global_step:
                             global_step += 1 # !!! TEST !!!
-                    if not supervised:
-                        for i in range(n_student_draws):           
-                            loss_sigreg += 0.1 * sigreg(output_s[:,i,k,:].float(), global_step) # !! TEST diversité sur les seeds                            
-                        if not strict_global_step:
-                            global_step += 1 # !!! TEST !!!
-
                 else:
                     assert False # not consistent
 
@@ -672,12 +667,6 @@ for epoch in range(train_epochs):
                         loss_jepa += mse(z_draw, z_center.detach())
                     else:
                         loss_jepa += mse(z_draw, z_center) 
-                    if not supervised:
-                        z_pos_student = output_s[:,i,k,:]
-                        if stop_gradient:
-                            loss_jepa += 0.1 * mse(z_pos_student, z_pos_center.detach())
-                        else:
-                            loss_jepa += 0.1 * mse(z_pos_student, z_pos_center) 
                     
                     if not test3:
                         loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -700,25 +689,32 @@ for epoch in range(train_epochs):
                     output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
                     loss_seeds += criterion(output_t_seed, labels)
 
-            if abmil_pos:
-                if epoch <= int(train_epochs * 1/3):
-                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
-                elif epoch <= int(train_epochs * 2/3):
-                    if np.random.rand() < 0.5:
-                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
-                    else:
-                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center) # !!! z_pos_center)
-                else:
-                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center)
+            loss_pos = 0.
+            if abmil_pos:    
+                pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+                loss_pos += F.mse_loss(pos_pred, pos_target)
+                for i_t in range(n_teacher_draws):
+                    pos_pred, _ = pos_predictor(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:]) # !!! z_pos_center)
+                    loss_pos += F.mse_loss(pos_pred, pos_target)
             else:
-                pos_pred = pos_predictor(z_pos_center)   
+                for i_t in range(n_teacher_draws):
+                    pos_pred = pos_predictor(z_pos_draws[:,i_t,:]) # !!! z_pos_center)
+                    loss_pos += F.mse_loss(pos_pred, pos_target)
+                #pos_pred = pos_predictor(z_pos_center)   
 
-            loss_z_pos = F.mse_loss(z_pos_center, z_pos_target)    
-            loss_pos = F.mse_loss(pos_pred, pos_target)
+            loss_z_pos = 0.
+            for i_t in range(n_teacher_draws):
+                loss_z_pos += F.mse_loss(z_pos_draws[:,i_t,:], z_pos_target)                
 
             if supervised:
                 if abmil_label:
-                    if epoch <= int(train_epochs * 1/3):
+                    loss_label = 0.
+                    output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
+                    loss_label += criterion(output_t_head, labels)
+                    for i_t in range(n_teacher_draws):
+                        output_t_head, _ = linear_head(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:])
+                        loss_label += criterion(output_t_head, labels)
+                    '''if epoch <= int(train_epochs * 1/3):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
                     elif epoch <= int(train_epochs * 2/3):
                         if np.random.rand() < 0.5:
@@ -726,22 +722,29 @@ for epoch in range(train_epochs):
                         else:
                             output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
                     else:
-                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)'''
+                    
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #z_pos_center) #
+                    loss_label = criterion(output_t_head, labels)
                 
                 if pure:
-                    loss_label = loss = criterion(output_t_head, labels)
+                    loss = loss_label 
                 else:
-                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos + criterion(output_t_head, labels)
+                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 10 * loss_z_pos + loss_label #criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 if abmil_label:
-                    output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_center.detach())
+                    loss_label = 0.
+                    output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_target)
+                    loss_label += criterion(output_t_head, labels)
+                    for i_t in range(n_teacher_draws):
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_draws[:,i_t,:].detach())
+                        loss_label += criterion(output_t_head, labels)
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim).detach()) #linear_head(z_pos_center.detach()) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                loss_label = criterion(output_t_head, labels)
-                loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 30 * loss_z_pos # !!!
+                #loss_label = criterion(output_t_head, labels)
+                loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 10 * loss_z_pos # !!!
 
         if not supervised:
             optimizer.zero_grad()
@@ -874,11 +877,13 @@ for epoch in range(train_epochs):
 
                         seed_centers = centers[:,:k,:]
                         z_center, _ = seeds_mlp(seed_centers) 
-                        z_pos_center = centers[:,k,:] 
+                        #z_pos_center = centers[:,k,:] 
+                        z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
                         seed_centers_sup = centers_sup[:,:k,:]
                         z_center_sup, _ = seeds_mlp(seed_centers_sup) 
-                        z_pos_center_sup = centers_sup[:,k,:]
+                        #z_pos_center_sup = centers_sup[:,k,:]
+                        z_pos_draws_sup  = output_t_sup[:, :, k, :] #.view(batch_size, embed_dim)
 
                         loss_jepa = torch.tensor(0.).to(device)
                         loss_sigreg = torch.tensor(0.).to(device)
@@ -888,11 +893,6 @@ for epoch in range(train_epochs):
                                 for j in range(k): # seeds loop
                                     for i in range(n_student_draws):           
                                         loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds                            
-                                    if not strict_global_step:
-                                        global_step += 1 # !!! TEST !!!
-                                if not supervised:
-                                    for i in range(n_student_draws):           
-                                        loss_sigreg += 0.1 * sigreg(output_s[:,i,k,:].float(), global_step) # !! TEST diversité sur les seeds                            
                                     if not strict_global_step:
                                         global_step += 1 # !!! TEST !!!
                             else:
@@ -906,12 +906,6 @@ for epoch in range(train_epochs):
                                     loss_jepa += mse(z_draw, z_center.detach())
                                 else:
                                     loss_jepa += mse(z_draw, z_center) 
-                                if not supervised:
-                                    z_pos_student = output_s[:,i,k,:]
-                                    if stop_gradient:
-                                        loss_jepa += 0.1 * mse(z_pos_student, z_pos_center.detach())
-                                    else:
-                                        loss_jepa += 0.1 * mse(z_pos_student, z_pos_center) 
                                 
                                 if not test3:
                                     loss_sigreg += sigreg(z_draw.float(), global_step) ## !! TEST diversité sur les draws
@@ -929,12 +923,14 @@ for epoch in range(train_epochs):
                                 seeds_correct[j] += (preds == labels).sum().item()         
 
 
+                        z_pos_sample = z_pos_draws[:,0,:]
+                        z_pos_sample_sup = z_pos_draws_sup[:,0,:]
                         if abmil_pos:
-                            pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center)
-                            pos_pred_sup, _ = pos_predictor(seed_centers_sup, z_pos_center_sup)
+                            pos_pred, _ = pos_predictor(output_t[:, 0, :k, :], z_pos_sample)
+                            pos_pred_sup, _ = pos_predictor(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
                         else:
-                            pos_pred = pos_predictor(z_pos_center)     
-                            pos_pred_sup = pos_predictor(z_pos_center_sup)
+                            pos_pred = pos_predictor(z_pos_sample)     
+                            pos_pred_sup = pos_predictor(z_pos_sample_sup)
 
                         if pos_supervised:
                             z_pos_target = z_star
@@ -943,14 +939,14 @@ for epoch in range(train_epochs):
                             z_pos_target = z_probe
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)     
 
-                        loss_z_pos = F.mse_loss(z_pos_center, z_pos_target)    
-                        loss_z_pos_sup = F.mse_loss(z_pos_center_sup, z_pos_target)    
+                        loss_z_pos = F.mse_loss(z_pos_sample, z_pos_target)    
+                        loss_z_pos_sup = F.mse_loss(z_pos_sample_sup, z_pos_target)    
                         loss_pos = F.mse_loss(pos_pred, pos_target)
                         loss_pos_sup = F.mse_loss(pos_pred_sup, pos_target)
 
                         if abmil_label:
-                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
-                            output_t_head_sup, _ = linear_head(seed_centers_sup, z_pos_center_sup)
+                            output_t_head, _ = linear_head(output_t[:, 0, :k, :], z_pos_sample)
+                            output_t_head_sup, _ = linear_head(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
                         else:
                             output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center) #seed_centers.view(batch_size, k * embed_dim))
                             output_t_head_sup = linear_head(seed_centers_sup[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center_sup) #seed_centers.view(batch_size, k * embed_dim))
