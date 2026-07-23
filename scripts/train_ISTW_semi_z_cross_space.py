@@ -59,7 +59,7 @@ std = 0.5 / zoom
 
 n_sab = 2
 
-k = 3 #12       # n_seeds
+k = 1 #3 #12       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -88,11 +88,11 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = True # **label** supervised
+supervised = False # **label** supervised
 if supervised:
     pure = False
     alpha = 1e-5 #3e-7
-    beta = 1e-4 #3e-5 #!! 
+    beta = 3e-4 # !!!!! 1e-4 #3e-5 #!! 
 else:
     pure = False
 pos_supervised = True # !!
@@ -104,7 +104,7 @@ test = True # seed diversity
 center_test = False # center seed consistency
 vicreg = False # more seed diversity
 test3 = False # no sample diversity
-strict_global_step = False
+strict_global_step = True # False  #                      *** !!!!! ***
 cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
@@ -113,7 +113,7 @@ if supervised:
     label_smoothing = 0.1
 else:
     label_smoothing = 0.1
-use_synset_embeddings =  True #False # 
+use_synset_embeddings =  False # True #
 synset_level = 4
 index_embeddings = True #False
 
@@ -311,7 +311,7 @@ else:
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 
-draws_attention = AttentionPooling(embed_dim, inv_temp=inv_temp)
+draws_attention = nn.ModuleList([AttentionPooling(embed_dim, inv_temp=inv_temp) for seed_idx in range(k+1)])
 
 
 if abmil_pos:
@@ -354,7 +354,7 @@ else:
         nn.Linear(k * embed_dim, bottleneck_dim),
     )
 
-if k>1:                                     # cross-draws integration (seed diversity)
+if True: #k>1:                                     # cross-draws integration (seed diversity)
     # LINEAR PROBES
     heads_per_seed = nn.ModuleList([
             nn.Sequential(
@@ -454,7 +454,7 @@ seeds_mlp.to(device)
 seeds_mlp.train()
 
 
-if k>1:
+if True: #k>1:
     heads_per_seed.to(device)
     heads_per_seed.train()
 
@@ -481,7 +481,7 @@ if supervised:
                 [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
                 {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-                {'params': seeds_mlp.parameters(),       'lr': 1e-4}, #1e-5},
+                {'params': seeds_mlp.parameters(),       'lr': 3e-5}, # !!!!! 1e-4}, #1e-5},
                 {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
                 weight_decay=3e-4, #0.04,  
             )
@@ -490,7 +490,7 @@ if supervised:
                 [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
                 {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-                {'params': seeds_mlp.parameters(),       'lr': 3e-4}, #1e-5},
+                {'params': seeds_mlp.parameters(),       'lr': 1e-4}, # !!!!!! 3e-4}, #1e-5},
                 {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
                 weight_decay=1e-3, #0.04,  
             )
@@ -508,8 +508,8 @@ else:
         optimizer = torch.optim.AdamW([
             {'params': ist_transformer.parameters(), 'lr': 3e-5},
             {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': 1e-4}, #3e-4},
-            {'params': seeds_mlp.parameters(),       'lr': 3e-4},
+            {'params': pos_predictor.parameters(),       'lr': 3e-4}, # !!!!! 1e-4}, #3e-4},
+            {'params': seeds_mlp.parameters(),       'lr': 1e-4}, # !!!!! 3e-4},
         ], weight_decay=1e-3)
 
     linear_optimizer = torch.optim.AdamW(
@@ -518,7 +518,7 @@ else:
         weight_decay=1e-3, #0.04,  
     )
 
-if k > 1:
+if True: #k > 1:
     seeds_optimizer = torch.optim.AdamW(
         heads_per_seed.parameters(),
         lr=1e-4,              #
@@ -632,9 +632,9 @@ for epoch in range(train_epochs):
 
             if cross_integration:
                 center_seeds = []
-                for seed_idx in range(k):
+                for seed_idx in range(k+1):
                     # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                    z, _ = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
+                    z, _ = draws_attention[seed_idx](output_t[:, :, seed_idx, :])           # (B, d)
                     center_seeds.append(z)
                 centers = torch.stack(center_seeds, dim=1)
             else:
@@ -643,8 +643,8 @@ for epoch in range(train_epochs):
             seed_centers = centers[:,:k,:]
             z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
             
-            #z_pos_center = centers[:,k,:] #.view(batch_size, embed_dim)
-            z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
+            z_pos_center = centers[:,k,:] #.view(batch_size, embed_dim)
+            # z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
             loss_sigreg = torch.tensor(0.).to(device)
@@ -656,8 +656,8 @@ for epoch in range(train_epochs):
                             loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds                            
                         if not strict_global_step:
                             global_step += 1 # !!! TEST !!!
-                else:
-                    assert False # not consistent
+                #else:
+                #    assert False # not consistent
 
             if n_student_draws > 0:
                 z_draws = []
@@ -683,47 +683,54 @@ for epoch in range(train_epochs):
                 z_pos_target = z_probe
                 pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)  
 
-            if k>1:
-                loss_seeds = 0
-                for j in range(k):
-                    output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
-                    loss_seeds += criterion(output_t_seed, labels)
+            '''loss_z_pos = 0.
+            for i_t in range(n_teacher_draws):
+                loss_z_pos += F.mse_loss(z_pos_draws[:,i_t,:], z_pos_target) '''
+
+            loss_z_pos = F.mse_loss(z_pos_center, z_pos_target)       
 
             loss_pos = 0.
-            if abmil_pos:    
-                pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+            if abmil_pos:   
+                if epoch <= int(train_epochs * 1/3): 
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
+                elif epoch <= int(train_epochs * 2/3):
+                    if np.random.rand() < 0.5:
+                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target)
+                    else:
+                        pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center.detach())
+                else:
+                    pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_center.detach())
                 loss_pos += F.mse_loss(pos_pred, pos_target)
-                for i_t in range(n_teacher_draws):
+                '''for i_t in range(n_teacher_draws):
                     pos_pred, _ = pos_predictor(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:]) # !!! z_pos_center)
-                    loss_pos += F.mse_loss(pos_pred, pos_target)
+                    loss_pos += F.mse_loss(pos_pred, pos_target)'''
+                
             else:
-                for i_t in range(n_teacher_draws):
+                '''for i_t in range(n_teacher_draws):
                     pos_pred = pos_predictor(z_pos_draws[:,i_t,:]) # !!! z_pos_center)
-                    loss_pos += F.mse_loss(pos_pred, pos_target)
-                #pos_pred = pos_predictor(z_pos_center)   
+                    loss_pos += F.mse_loss(pos_pred, pos_target)'''
+                pos_pred = pos_predictor(z_pos_target) # !!! z_pos_center.detach())  
 
-            loss_z_pos = 0.
-            for i_t in range(n_teacher_draws):
-                loss_z_pos += F.mse_loss(z_pos_draws[:,i_t,:], z_pos_target)                
-
+            
+           
             if supervised:
                 if abmil_label:
-                    loss_label = 0.
+                    '''loss_label = 0.
                     output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
                     loss_label += criterion(output_t_head, labels)
                     for i_t in range(n_teacher_draws):
-                        output_t_head, _ = linear_head(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:])
-                        loss_label += criterion(output_t_head, labels)
-                    '''if epoch <= int(train_epochs * 1/3):
+                        output_t_head, _ = linear_head(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:].detach())
+                        loss_label += criterion(output_t_head, labels)'''
+                    if epoch <= int(train_epochs * 1/3):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
                     elif epoch <= int(train_epochs * 2/3):
                         if np.random.rand() < 0.5:
                             output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
                         else:
-                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center.detach())
                     else:
-                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center)'''
-                    
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_center.detach())
+                    loss_label = criterion(output_t_head, labels)
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #z_pos_center) #
                     loss_label = criterion(output_t_head, labels)
@@ -731,26 +738,42 @@ for epoch in range(train_epochs):
                 if pure:
                     loss = loss_label 
                 else:
-                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 10 * loss_z_pos + loss_label #criterion(output_t_head, labels)
+                    loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 30 * loss_z_pos + loss_label #criterion(output_t_head, labels)
             else:
                 #output_t_head = linear_head(z_center.detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 if abmil_label:
-                    loss_label = 0.
+                    '''loss_label = 0.
                     output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_target)
                     loss_label += criterion(output_t_head, labels)
                     for i_t in range(n_teacher_draws):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_draws[:,i_t,:].detach())
-                        loss_label += criterion(output_t_head, labels)
+                        loss_label += criterion(output_t_head, labels)'''
+                    if epoch <= int(train_epochs * 1/3):
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_target)
+                    elif epoch <= int(train_epochs * 2/3):
+                        if np.random.rand() < 0.5:
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_target)
+                        else:
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_center.detach())
+                    else:
+                        output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_center.detach())
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim).detach()) #linear_head(z_pos_center.detach()) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
-                #loss_label = criterion(output_t_head, labels)
-                loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 10 * loss_z_pos # !!!
+                loss_label = criterion(output_t_head, labels)
+                loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 30 * loss_z_pos # !!!
+
+            if True: #k>1:
+                loss_seeds = 0
+                for j in range(k):
+                    output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
+                    loss_seeds += criterion(output_t_seed, labels)          
+
 
         if not supervised:
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
-            if k>1:
+            if True: #k>1:
                 torch.nn.utils.clip_grad_norm_(draws_attention.parameters(), 1.0)
             optimizer.step()
 
@@ -762,7 +785,7 @@ for epoch in range(train_epochs):
             torch.nn.utils.clip_grad_norm_(draws_attention.parameters(), 1.0)
         linear_optimizer.step()
 
-        if k>1:
+        if True: #k>1:
             seeds_optimizer.zero_grad()
             loss_seeds.backward()
             seeds_optimizer.step()
@@ -776,7 +799,7 @@ for epoch in range(train_epochs):
             pos_predictor.eval()
             draws_attention.eval()
             seeds_mlp.eval()                
-            if k>1:
+            if True: #k>1:
                 heads_per_seed.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
@@ -863,10 +886,10 @@ for epoch in range(train_epochs):
                             center_seeds_sup = []
                             for seed_idx in range(k+1):
                                 # Vues de ce seed à travers tous les draws : (B, n_draws, d)
-                                z, w = draws_attention(output_t[:, :, seed_idx, :])           # (B, d)
+                                z, w = draws_attention[seed_idx](output_t[:, :, seed_idx, :])           # (B, d)
                                 mem_w += [w]
                                 center_seeds.append(z)
-                                z_sup, w_sup = draws_attention(output_t_sup[:, :, seed_idx, :])           # (B, d)
+                                z_sup, w_sup = draws_attention[seed_idx](output_t_sup[:, :, seed_idx, :])           # (B, d)
                                 mem_w_sup += [w_sup]
                                 center_seeds_sup.append(z_sup)
                             centers = torch.stack(center_seeds, dim=1)
@@ -877,13 +900,13 @@ for epoch in range(train_epochs):
 
                         seed_centers = centers[:,:k,:]
                         z_center, _ = seeds_mlp(seed_centers) 
-                        #z_pos_center = centers[:,k,:] 
-                        z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
+                        z_pos_center = centers[:,k,:] 
+                        #z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
                         seed_centers_sup = centers_sup[:,:k,:]
                         z_center_sup, _ = seeds_mlp(seed_centers_sup) 
-                        #z_pos_center_sup = centers_sup[:,k,:]
-                        z_pos_draws_sup  = output_t_sup[:, :, k, :] #.view(batch_size, embed_dim)
+                        z_pos_center_sup = centers_sup[:,k,:]
+                        #z_pos_draws_sup  = output_t_sup[:, :, k, :] #.view(batch_size, embed_dim)
 
                         loss_jepa = torch.tensor(0.).to(device)
                         loss_sigreg = torch.tensor(0.).to(device)
@@ -895,8 +918,8 @@ for epoch in range(train_epochs):
                                         loss_sigreg += sigreg(output_s[:,i,j,:].float(), global_step) # !! TEST diversité sur les seeds                            
                                     if not strict_global_step:
                                         global_step += 1 # !!! TEST !!!
-                            else:
-                                assert False # not consistent
+                            '''else:
+                                assert False # not consistent'''
 
                         if n_student_draws > 0:
                             z_draws = []
@@ -915,7 +938,7 @@ for epoch in range(train_epochs):
                         if strict_global_step:
                             global_step += 1
 
-                        if k>1:
+                        if True: #k>1:
                             loss_seeds = 0
                             for j in range(k):
                                 output_t_seed = heads_per_seed[j](centers[:,j,:].detach())
@@ -923,14 +946,16 @@ for epoch in range(train_epochs):
                                 seeds_correct[j] += (preds == labels).sum().item()         
 
 
-                        z_pos_sample = z_pos_draws[:,0,:]
-                        z_pos_sample_sup = z_pos_draws_sup[:,0,:]
+                        #z_pos_sample = z_pos_draws[:,0,:]
+                        #z_pos_sample_sup = z_pos_draws_sup[:,0,:]
                         if abmil_pos:
-                            pos_pred, _ = pos_predictor(output_t[:, 0, :k, :], z_pos_sample)
-                            pos_pred_sup, _ = pos_predictor(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
+                            #pos_pred, _ = pos_predictor(output_t[:, 0, :k, :], z_pos_sample)
+                            #pos_pred_sup, _ = pos_predictor(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
+                            pos_pred, _ = pos_predictor(output_t[:, 0, :k, :], z_pos_center)
+                            pos_pred_sup, _ = pos_predictor(output_t_sup[:, 0, :k, :], z_pos_center_sup)
                         else:
-                            pos_pred = pos_predictor(z_pos_sample)     
-                            pos_pred_sup = pos_predictor(z_pos_sample_sup)
+                            pos_pred = pos_predictor(z_pos_center)     
+                            pos_pred_sup = pos_predictor(z_pos_center_sup)
 
                         if pos_supervised:
                             z_pos_target = z_star
@@ -939,23 +964,27 @@ for epoch in range(train_epochs):
                             z_pos_target = z_probe
                             pos_target = torch.stack([x_probe, y_probe], dim=1)   # (B, 2)     
 
-                        loss_z_pos = F.mse_loss(z_pos_sample, z_pos_target)    
-                        loss_z_pos_sup = F.mse_loss(z_pos_sample_sup, z_pos_target)    
+                        #loss_z_pos = F.mse_loss(z_pos_sample, z_pos_target)    
+                        #loss_z_pos_sup = F.mse_loss(z_pos_sample_sup, z_pos_target)
+                        loss_z_pos = F.mse_loss(z_pos_center, z_pos_target)    
+                        loss_z_pos_sup = F.mse_loss(z_pos_center_sup, z_pos_target)      
                         loss_pos = F.mse_loss(pos_pred, pos_target)
                         loss_pos_sup = F.mse_loss(pos_pred_sup, pos_target)
 
                         if abmil_label:
-                            output_t_head, _ = linear_head(output_t[:, 0, :k, :], z_pos_sample)
-                            output_t_head_sup, _ = linear_head(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
+                            #output_t_head, _ = linear_head(output_t[:, 0, :k, :], z_pos_sample)
+                            #output_t_head_sup, _ = linear_head(output_t_sup[:, 0, :k, :], z_pos_sample_sup)
+                            output_t_head, _ = linear_head(output_t[:, 0, :k, :], z_pos_center)
+                            output_t_head_sup, _ = linear_head(output_t_sup[:, 0, :k, :], z_pos_center_sup)
                         else:
                             output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center) #seed_centers.view(batch_size, k * embed_dim))
                             output_t_head_sup = linear_head(seed_centers_sup[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center_sup) #seed_centers.view(batch_size, k * embed_dim))
                         
                         if supervised:
-                            loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos + criterion(output_t_head, labels)
+                            loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 30 * loss_z_pos + criterion(output_t_head, labels)
                         else:
                             loss_label = criterion(output_t_head, labels)
-                            loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos
+                            loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + 30 * loss_z_pos
 
                     if n_val == 0:
                         ratio = lam * loss_sigreg.item() / ((1 - lam) * loss_jepa.item() + 1e-8)
@@ -972,7 +1001,7 @@ for epoch in range(train_epochs):
                             print(f"pos sup error = {np.sqrt(loss_pos_sup.item()):.3f}")
                         
                         if cross_integration:
-                            if k>1:
+                            if True: #k>1:
                                 for i in range(k):
                                     print(f"seed {i}", mem_w[i][0,...].detach().float().cpu().numpy().flatten())
                                 print(f"pos", mem_w[k][0,...].detach().float().cpu().numpy().flatten())
@@ -1021,7 +1050,7 @@ for epoch in range(train_epochs):
             pos_predictor.train()
             draws_attention.train()
             seeds_mlp.train()
-            if k>1:
+            if True: #k>1:
                 heads_per_seed.train()
 
     if epoch % 10 == 9:
@@ -1033,7 +1062,7 @@ for epoch in range(train_epochs):
                 "seeds_mlp": seeds_mlp.state_dict(),
                 "linear_head": linear_head.state_dict(),
                 "pos_predictor": pos_predictor.state_dict(),
-                "heads_per_seed": heads_per_seed.state_dict() if k>1 else None
+                "heads_per_seed": heads_per_seed.state_dict(), # if True #k>1 else None
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
 
     if schedule:

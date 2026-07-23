@@ -1264,7 +1264,8 @@ class WhereIterativeSeedTransformer(nn.Module):
             nn.Dropout(label_smoothing), # increase label embedding entropy
         )
 
-        # Token label — embedding appris        
+        # Token label — embedding appris     
+        self.pretrained_embeddings = pretrained_embeddings is not None 
         if pretrained_embeddings is not None:
             n_classes, label_emb_dim = pretrained_embeddings.shape
             self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
@@ -1308,7 +1309,10 @@ class WhereIterativeSeedTransformer(nn.Module):
         else:
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
         
-        l_emb = self.pre_ffn(self.pre_norm(l_emb)).unsqueeze(1)
+        if self.pretrained_embeddings:
+            l_emb = self.pre_ffn(self.pre_norm(l_emb)).unsqueeze(1)
+        else:
+            l_emb = self.pre_norm(l_emb).unsqueeze(1)
 
         for block in self.blocks:
             views, seeds, l_emb, attn_pos = block(views, seeds, l_emb)  
