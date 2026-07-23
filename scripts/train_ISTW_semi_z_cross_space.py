@@ -59,7 +59,7 @@ std = 0.5 / zoom
 
 n_sab = 2
 
-k = 1 #3 #12       # n_seeds
+k = 3 #12       # n_seeds
 n_heads = 12
 
 n_saccades_max = 30 
@@ -88,7 +88,7 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = False # **label** supervised
+supervised = True # **label** supervised
 if supervised:
     pure = False
     alpha = 1e-5 #3e-7
@@ -113,7 +113,7 @@ if supervised:
     label_smoothing = 0.1
 else:
     label_smoothing = 0.1
-use_synset_embeddings =  False # True #
+use_synset_embeddings =  True #False # 
 synset_level = 4
 index_embeddings = True #False
 
@@ -691,7 +691,7 @@ for epoch in range(train_epochs):
 
             loss_pos = 0.
             if abmil_pos:   
-                if epoch <= int(train_epochs * 1/3): 
+                if True: #epoch <= int(train_epochs * 1/3): 
                     pos_pred, _ = pos_predictor(seed_centers[:,:k,:], z_pos_target) # !!! z_pos_center)
                 elif epoch <= int(train_epochs * 2/3):
                     if np.random.rand() < 0.5:
@@ -721,7 +721,7 @@ for epoch in range(train_epochs):
                     for i_t in range(n_teacher_draws):
                         output_t_head, _ = linear_head(output_t[:, i_t, :k, :], z_pos_draws[:,i_t,:].detach())
                         loss_label += criterion(output_t_head, labels)'''
-                    if epoch <= int(train_epochs * 1/3):
+                    if True: #epoch <= int(train_epochs * 1/3):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:], z_pos_target)
                     elif epoch <= int(train_epochs * 2/3):
                         if np.random.rand() < 0.5:
@@ -748,7 +748,7 @@ for epoch in range(train_epochs):
                     for i_t in range(n_teacher_draws):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_draws[:,i_t,:].detach())
                         loss_label += criterion(output_t_head, labels)'''
-                    if epoch <= int(train_epochs * 1/3):
+                    if True: #epoch <= int(train_epochs * 1/3):
                         output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_pos_target)
                     elif epoch <= int(train_epochs * 2/3):
                         if np.random.rand() < 0.5:
