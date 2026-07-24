@@ -68,8 +68,8 @@ n_uplet_teacher = 5
 n_student_draws = 4
 n_teacher_draws = 3
 
-orig = False
-grid = True
+orig = True
+grid = False
 curriculum = False
 finetune = False
 
@@ -84,11 +84,11 @@ if finetune:
     n_teacher_draws = 1
 
 
-train_epochs = 100
+train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = False # **label** supervised
+supervised = True # **label** supervised
 if supervised:
     pure = False
     alpha = 1e-6 #3e-7
@@ -490,7 +490,7 @@ if supervised:
             )
         else:
             linear_optimizer = torch.optim.AdamW(
-                [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+                [{'params': ist_transformer.parameters(), 'lr': 1e-5}, #3e-6},
                 {'params': draws_attention.parameters(),       'lr': 1e-4}, #1e-5},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
                 {'params': seeds_mlp.parameters(),       'lr': 1e-4}, # !!!!!! 3e-4}, #1e-5},
