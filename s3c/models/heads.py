@@ -203,7 +203,7 @@ class ABMILPosPredictor(nn.Module):
         self.head = nn.Linear(hidden_dim, out_dim)
         
 
-    def forward(self, s, z):
+    '''def forward(self, s, z):
         # s : (B, k, emb_dim)
         # z : (B, emb_dim)
 
@@ -227,7 +227,48 @@ class ABMILPosPredictor(nn.Module):
 
         hz = torch.cat([h, z_norm], dim=-1)
         out = self.combine(hz)
-        return self.head(out), w
+        return self.head(out), w'''
+
+    def forward(self, s, z):
+        # s : (B, k, emb_dim)
+        # z : (B, k', emb_dim)  -- ou (B, emb_dim) pour compat rétroactive
+
+        if s.dim() == 2:
+            s = s.unsqueeze(1)          # (B, emb_dim) -> (B, 1, emb_dim)
+
+        z_was_2d = (z.dim() == 2)
+        if z_was_2d:
+            z = z.unsqueeze(1)          # (B, emb_dim) -> (B, 1, emb_dim)
+
+        B, k, _ = s.shape
+        kp = z.shape[1]
+
+        z_norm = self.z_transform(self.norm_z(z))          # (B, k', emb_dim)
+
+        s_norm = torch.stack([
+            self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
+        ], dim=1)                                           # (B, k, emb_dim)
+
+        # Broadcast s et z sur une grille (B, k', k, emb_dim)
+        s_exp = s_norm.unsqueeze(1).expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
+        z_exp = z_norm.unsqueeze(2).expand(-1, -1, k, -1)    # (B, k', k, emb_dim)
+        sz = torch.cat([s_exp, z_exp], dim=-1)               # (B, k', k, 2*emb_dim)
+
+        # ABMIL conditionné sur chaque z, en parallèle
+        w = self.attn(sz)                  # (B, k', k, 1)
+        w = torch.softmax(w, dim=2)        # softmax sur les seeds (dim k)
+        h = (w * s_exp).sum(dim=2)         # (B, k', emb_dim)
+
+        hz = torch.cat([h, z_norm], dim=-1)   # (B, k', 2*emb_dim)
+        out = self.combine(hz)                 # (B, k', ...)
+        logits = self.head(out)                # (B, k', ...)
+
+        if z_was_2d:
+            # comportement identique à l'original : pas de dimension k' superflue
+            logits = logits.squeeze(1)
+            w = w.squeeze(1)
+
+        return logits, w
 
 
 class TransformerPosPredictor(nn.Module):
@@ -1318,6 +1359,84 @@ class WhereIterativeSeedTransformer(nn.Module):
             views, seeds, l_emb, attn_pos = block(views, seeds, l_emb)  
 
         return torch.cat([seeds, self.post_ffn(self.norm_out(l_emb))], dim=1) 
+    
+
+class WherePosIterativeSeedTransformer(nn.Module):
+    def __init__(self, emb_dim=768,
+                 n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 n_classes=1000, frozen_emb = True, 
+                 label_smoothing=0.1, label_mask = 0.2):
+        super().__init__()
+
+        self.pre_norm  = nn.LayerNorm(emb_dim)   
+
+        self.pre_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(label_smoothing), # increase label embedding entropy
+        )
+
+        self.pre_pos_norm  = nn.LayerNorm(emb_dim)   
+        self.pre_pos_ffn = nn.Sequential(
+            nn.Linear(2, 256),
+            nn.GELU(),
+            nn.Linear(256, emb_dim),
+            nn.Dropout(0.1), # increase label embedding entropy
+        )
+
+        # Token label — embedding appris     
+        self.pretrained_embeddings = pretrained_embeddings is not None 
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape
+            self.label_embedding = nn.Embedding(n_classes, label_emb_dim)
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+        else:
+            self.label_embedding = nn.Embedding(n_classes, emb_dim)
+            frozen_emb = False
+        # Optionnel : geler les embeddings  
+        if frozen_emb:
+            self.label_embedding.weight.requires_grad = False
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+        
+        self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
+        self.blocks = nn.ModuleList([
+            WhereBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+        ])
+
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.label_mask = label_mask
+
+    def forward(self, views, labels, pos):
+        B = views.size(0)
+        seeds = self.seeds.expand(B, -1, -1).clone()
+
+        # LABELS pre-processing (B, emb_dim)
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < self.label_mask
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls_, l_emb)
+        elif labels is not None:
+            l_emb = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
+        
+        if self.pretrained_embeddings:
+            l_emb = self.pre_norm(self.pre_ffn(l_emb)).unsqueeze(1)
+        else:
+            l_emb = self.pre_norm(l_emb).unsqueeze(1)
+
+        # POS input (B, n_probe, emb_dim)
+        if pos is not None:
+            pos = self.pre_pos_norm(self.pre_pos_ffn(pos))
+            l_emb = torch.cat([l_emb, pos], dim=1)
+
+        for block in self.blocks:
+            views, seeds, l_emb, attn_pos = block(views, seeds, l_emb)  
+
+        return torch.cat([seeds, l_emb], dim=1) 
     
 
 class DualPredictor(nn.Module):
