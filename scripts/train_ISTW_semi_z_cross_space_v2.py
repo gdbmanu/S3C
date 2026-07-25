@@ -89,7 +89,7 @@ train_epochs = 30
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
-supervised = True # **label** supervised
+supervised = False # **label** supervised
 if supervised:
     pure = False
     alpha = 1e-6 #3e-7
@@ -676,7 +676,7 @@ for epoch in range(train_epochs):
             z_center, _ = seeds_mlp(seed_centers) #.view(batch_size, k*embed_dim))
             
             z_pos_centers = z_pos_predictor(centers[:,k:,:]) #.view(batch_size, embed_dim)
-            label_center = centers[:,k,:]
+            z_label_center = centers[:,k,:]
             # z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
@@ -734,7 +734,7 @@ for epoch in range(train_epochs):
             ### LABEL LOSS
             if supervised:
                 if abmil_label:
-                    output_t_head, _ = linear_head(seed_centers[:,:k,:], label_center) # !!! 
+                    output_t_head, _ = linear_head(seed_centers[:,:k,:], z_label_center) # !!! 
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #z_pos_center) #
                 loss_label = criterion(output_t_head, labels)
@@ -745,7 +745,7 @@ for epoch in range(train_epochs):
                     loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos + loss_label #criterion(output_t_head, labels)
             else:
                 if abmil_label:
-                    output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), label_center.detach())
+                    output_t_head, _ = linear_head(seed_centers[:,:k,:].detach(), z_label_center.detach())
                 else:
                     output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim).detach()) #linear_head(z_pos_center.detach()) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
                 loss_label = criterion(output_t_head, labels)
@@ -899,9 +899,9 @@ for epoch in range(train_epochs):
                         z_center_sup, _ = seeds_mlp(seed_centers_sup) 
 
                         z_pos_centers = z_pos_predictor(centers[:,k:,:])
-                        label_center = centers[:,k,:]
+                        z_label_center = centers[:,k,:]
                         z_pos_centers_sup = z_pos_predictor(centers_sup[:,k:,:])
-                        label_center_sup = centers_sup[:,k,:]
+                        z_label_center_sup = centers_sup[:,k,:]
 
                         loss_jepa = torch.tensor(0.).to(device)
                         loss_sigreg = torch.tensor(0.).to(device)
@@ -964,8 +964,8 @@ for epoch in range(train_epochs):
 
                         ### LABEL LOSS
                         if abmil_label:
-                            output_t_head, _ = linear_head(seed_centers[:,:k,:], label_center)
-                            output_t_head_sup, _ = linear_head(seed_centers_sup[:,:k,:], label_center_sup)
+                            output_t_head, _ = linear_head(seed_centers[:,:k,:], z_label_center)
+                            output_t_head_sup, _ = linear_head(seed_centers_sup[:,:k,:], z_label_center_sup)
                         else:
                             output_t_head = linear_head(seed_centers[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center) #seed_centers.view(batch_size, k * embed_dim))
                             output_t_head_sup = linear_head(seed_centers_sup[:,:k,:].view(batch_size, k * embed_dim)) #linear_head(z_pos_center_sup) #seed_centers.view(batch_size, k * embed_dim))
@@ -990,7 +990,7 @@ for epoch in range(train_epochs):
                         if pos_supervised:
                             print(f"pos target : ({x_star[0].item():.3f},{y_star[0].item():.3f}), pos_pred ({pos_preds[0,0,0].item():.3f},{pos_preds[0,0,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,0,0].item():.3f},{pos_preds_sup[0,0,1].item():.3f}) ")
                         else:
-                            print(f"pos target : ({x_probe[0,0].item():.3f},{y_probe[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}) ")
+                            print(f"pos target : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}) ")
                         print(f"z_pos ref error = {np.sqrt(loss_z_pos_ref.item()):.3f}")
                         print(f"z_pos error = {np.sqrt(loss_z_pos.item()):.3f}")
                         if pos_supervised:
