@@ -69,17 +69,18 @@ n_student_draws = 4
 n_teacher_draws = 3
 n_probes = 3
 
-orig = False
+orig = True
 grid = False
 curriculum = False
 finetune = False
 
 if grid:
     n_saccades_max = 121
-    n_uplet_student = 9
-    n_uplet_teacher = 18
+    n_uplet_student = 5
+    n_uplet_teacher = 12
     n_student_draws = 6
     n_teacher_draws = 3
+    n_probes = 5
 if finetune:
     n_student_draws = 0
     n_teacher_draws = 1
