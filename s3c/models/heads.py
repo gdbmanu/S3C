@@ -229,12 +229,15 @@ class ABMILPosPredictor(nn.Module):
         out = self.combine(hz)
         return self.head(out), w'''
 
-    def forward(self, s, z):
+    def forward(self, s, z, seed_idx=None):
         # s : (B, k, emb_dim)
         # z : (B, k', emb_dim)  -- ou (B, emb_dim) pour compat rétroactive
 
         if s.dim() == 2:
             s = s.unsqueeze(1)          # (B, emb_dim) -> (B, 1, emb_dim)
+
+        if seed_idx is not None:
+            s = s[:, :1, :]   # (B, 1, emb_dim) — garde la dim
 
         z_was_2d = (z.dim() == 2)
         if z_was_2d:
@@ -245,13 +248,24 @@ class ABMILPosPredictor(nn.Module):
 
         z_norm = self.z_transform(self.norm_z(z))          # (B, k', emb_dim)
 
-        s_norm = torch.stack([
-            self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
-        ], dim=1)                                           # (B, k, emb_dim)
+        if seed_idx is not None:
+            s_norm = torch.stack([
+                self.seed_transform[i](self.norm_s[i](s)) for i in range(seed_idx, seed_idx+1)
+            ], dim=1)   
+        else:
+            s_norm = torch.stack([
+                self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
+            ], dim=1)                                           # (B, k, emb_dim)
 
         # Broadcast s et z sur une grille (B, k', k, emb_dim)
-        s_exp = s_norm.unsqueeze(1).expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
-        z_exp = z_norm.unsqueeze(2).expand(-1, -1, k, -1)    # (B, k', k, emb_dim)
+        if seed_idx is  None:
+            s_exp = s_norm.unsqueeze(1).expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
+        else:
+            s_exp = s_norm.expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
+        if seed_idx is not None:
+            z_exp = z_norm.unsqueeze(2).expand(-1, -1, 1, -1)    # (B, k', 1, emb_dim)
+        else:
+            z_exp = z_norm.unsqueeze(2).expand(-1, -1, k, -1)    # (B, k', k, emb_dim)
         sz = torch.cat([s_exp, z_exp], dim=-1)               # (B, k', k, 2*emb_dim)
 
         # ABMIL conditionné sur chaque z, en parallèle
@@ -1615,9 +1629,12 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
         self.norm_out = nn.LayerNorm(emb_dim)
         self.label_mask = label_mask
 
-    def forward(self, views, labels, pos):
+    def forward(self, views, labels, pos, seed_idx=None):
         B = views.size(0)
-        seeds = self.seeds.expand(B, -1, -1).clone()
+        if seed_idx is None:
+            seeds = self.seeds.expand(B, -1, -1).clone()
+        else:
+            seeds = self.seeds[:,seed_idx,:].expand(B, -1, -1).clone()
 
         # LABELS pre-processing (B, emb_dim)
         if labels is not None and self.training:
