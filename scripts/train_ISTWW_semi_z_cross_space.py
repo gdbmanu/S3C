@@ -97,6 +97,7 @@ if supervised:
 else:
     pure = False
 pos_supervised = True # !!
+pos_separation = True # !!
 
 inv_temp = 1
 stop_gradient = False
@@ -113,7 +114,8 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-use_synset_embeddings =  True #False # 
+use_synset_embeddings =  False # True
+index_embeddings = False # True
 synset_level = 4
 if supervised:
     if use_synset_embeddings:
@@ -122,7 +124,6 @@ if supervised:
         label_smoothing = 0.8
 else:
     label_smoothing = 0.5
-index_embeddings = True #False
 
 abmil_pos = True
 abmil_label = False
@@ -169,6 +170,7 @@ if index_embeddings:
 if use_synset_embeddings:
     suffix = suffix + f"_SYNSET{synset_level}"
 
+if pos_separation: suffix = suffix + '_SEPAR'
 
 if abmil_seed: suffix = suffix + '_ASEED'
 if abmil_pos : suffix = suffix + "_APOS2"
@@ -289,7 +291,7 @@ if use_synset_embeddings:
 
     
     ist_transformer = WhatWherePosIterativeSeedTransformer(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                    n_classes=n_synsets,
+                                                    n_classes=n_synsets, pos_separation = pos_separation, 
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 
@@ -313,6 +315,7 @@ else:
         emb = label_embeddings
     
     ist_transformer = WhatWherePosIterativeSeedTransformer(n_heads=n_heads, n_seeds=k, n_blocks=n_sab, pretrained_embeddings=emb,
+                                                    pos_separation = pos_separation,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 

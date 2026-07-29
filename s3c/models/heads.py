@@ -1422,6 +1422,156 @@ class WhatWhereBlock(nn.Module):
 
         return v, s, l, z, attn_l, attn_z
 
+class WhatWherePosBlock(nn.Module):
+    """
+    Un bloc = 
+      - cross-attention query → seeds (query lisent les seeds transformées)
+      - pas de self-attention sur les query
+    """
+
+    def __init__(self, emb_dim=768, n_heads=12, 
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 l_emb_detach=False, n_blocks=2):
+        super().__init__()
+
+        ## VIEWS
+
+        self.view_norm = nn.LayerNorm(emb_dim)
+
+        self.view_self_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.view_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.view_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## SEEDS
+
+        self.seed_norm = nn.LayerNorm(emb_dim)
+        self.cross_v_norm = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : seeds lisent les vues
+        self.seed_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.seed_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.seed_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## WHAT EMBEDDINGS
+
+        self.l_norm  = nn.LayerNorm(emb_dim)
+        self.cross_s_norm = nn.LayerNorm(emb_dim)   # sur les seeds
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.l_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.l_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.l_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        ## WHERE EMBEDDINGS
+
+        self.z_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.z_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.z_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.z_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        ## POS EMBEDDINGS
+
+        self.pos_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.pos_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.pos_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.pos_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+
+    def forward(self, views, seeds, l, z, pos):
+        # ── Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        v = v + h_views
+        v = v + self.view_ffn(self.view_norm_ffn(v))
+
+        # ── Seeds lisent les vues transformées ─────────────────────
+        v_cross = self.cross_v_norm(v)
+        s = self.seed_norm(seeds)
+        h_seeds, _ = self.seed_cross_attn(s, v_cross, v_cross)
+        s = s + h_seeds 
+        s = s + self.seed_ffn(self.seed_norm_ffn(s))
+
+        # ── label queries lisent les seeds ─────────────────────
+        # pas de residual (!!)
+        
+        s_cross = self.cross_s_norm(s)
+        l = self.l_norm(l)
+        h_l, attn_l = self.l_cross_attn(l, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
+
+        # ── z queries lisent les seeds ─────────────────────
+        
+        z = self.z_norm(z)
+        h_z, attn_z = self.z_cross_attn(z, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        z = z + h_z
+        z = z + self.z_ffn(self.z_norm_ffn(z))                 # (B, 1, emb_dim)
+
+        # ── pos queries lisent les seeds ─────────────────────
+        
+        if pos is not None:
+            pos = self.pos_norm(pos)
+            h_pos, attn_pos = self.pos_cross_attn(pos, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+            pos = pos + h_pos
+            pos = pos + self.pos_ffn(self.pos_norm_ffn(pos))                 # (B, 1, emb_dim)
+        else:
+            attn_pos = None
+
+        return v, s, l, z, pos, attn_l, attn_z, attn_pos
+
 class WhereIterativeSeedTransformer(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
@@ -1575,15 +1725,21 @@ class WherePosIterativeSeedTransformer(nn.Module):
 class WhatWherePosIterativeSeedTransformer(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_seeds=3, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
-                 n_classes=1000, frozen_emb = True, 
+                 n_classes=1000, frozen_emb = True, pos_separation = False,
                  label_smoothing=0.1, label_mask = 0.2):
         super().__init__()
 
         self.seeds = nn.Parameter(torch.randn(1, n_seeds, emb_dim))
 
-        self.blocks = nn.ModuleList([
-            WhatWhereBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
-        ])
+        self.pos_separation = pos_separation
+        if pos_separation:
+            self.blocks = nn.ModuleList([
+                WhatWherePosBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                WhatWhereBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+            ])
 
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   
         self.pre_l_ffn = nn.Sequential(
@@ -1602,7 +1758,6 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
             nn.Linear(4 * emb_dim, emb_dim),
             nn.Dropout(dropout), 
         )
-
 
         self.pre_pos_ffn = nn.Sequential(
             nn.Linear(2, 256),
@@ -1645,8 +1800,7 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
         elif labels is not None:
             l_emb = self.label_embedding(labels)  # (B, emb_dim)
         else:
-            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)
-        
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
         l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1)
 
         # Z_POS pre-processing (B, emb_dim)
@@ -1663,13 +1817,16 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
 
         # POS input (B, n_probe, emb_dim)
         if pos is not None:
-            pos = self.pre_pos_norm(self.pre_pos_ffn(pos))
+            pos = self.pre_pos_norm(self.pre_pos_ffn(pos))     
+
+        if self.pos_separation:
+            for block in self.blocks:
+                views, seeds, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, seeds, l_emb, z_emb, pos)
             pos = torch.cat([z_emb, pos], dim=1)
         else:
-            pos = z_emb
-
-        for block in self.blocks:
-            views, seeds, l_emb, pos, attn_l, attn_pos = block(views, seeds, l_emb, pos)  
+            pos = torch.cat([z_emb, pos], dim=1)
+            for block in self.blocks:
+                views, seeds, l_emb, pos, attn_l, attn_pos = block(views, seeds, l_emb, pos)  
 
         return torch.cat([seeds, l_emb, pos], dim=1) 
     
