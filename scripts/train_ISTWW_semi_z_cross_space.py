@@ -57,7 +57,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 2
+n_sab = 4
 
 k = 3 #12       # n_seeds
 n_heads = 12
@@ -85,7 +85,7 @@ if finetune:
     n_teacher_draws = 1
 
 
-train_epochs = 30
+train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
@@ -114,8 +114,8 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-use_synset_embeddings =  False # True
-index_embeddings = False # True
+use_synset_embeddings =  True #False # True
+index_embeddings = True # False # True
 synset_level = 4
 if supervised:
     if use_synset_embeddings:
