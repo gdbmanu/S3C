@@ -53,20 +53,26 @@ class ShiftZoomUplet:
 
         return img_zoomed.crop((left, top, left + size_ref, top + size_ref)) #left + w, top + h))
 
-    def __call__(self, img):
+    def __call__(self, img, views_list = None):
         """
         Retourne une liste de n_uplet tuples :
           (img_shifted: PIL.Image, sx: float, sy: float, zoom: float)
         """
         views = []
-        for i in range(self.n_uplet):
-            if self.start_center and i == 0:
-                sx, sy = [0, 0]
-            else:
-                sx, sy = np.random.normal(0, self.std, 2)
-                sx, sy = float(np.clip(sx, -1, 1)), float(np.clip(sy, -1, 1))
-            img_shifted = self.shift_zoom(img, sx, sy)
-            views.append((img_shifted, sx, sy, self.zoom))  # ← tuple complet
+        if views_list is None:
+            for i in range(self.n_uplet):
+                if self.start_center and i == 0:
+                    sx, sy = [0, 0]
+                else:
+                    sx, sy = np.random.normal(0, self.std, 2)
+                    sx, sy = float(np.clip(sx, -1, 1)), float(np.clip(sy, -1, 1))
+                img_shifted = self.shift_zoom(img, sx, sy)
+                views.append((img_shifted, sx, sy, self.zoom)) 
+        else:
+            for (sx, sy) in views_list:
+                img_shifted = self.shift_zoom(img, sx, sy)
+                views.append((img_shifted, sx, sy, self.zoom))
+
         return views
 
 class ShiftZoomGrid(ShiftZoomUplet):
