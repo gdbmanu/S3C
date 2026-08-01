@@ -69,17 +69,19 @@ n_student_draws = 4
 n_teacher_draws = 3
 n_probes = 3
 
-orig = False
+orig = True
 grid = False
 curriculum = False
 finetune = False
 
 if grid:
+    k = 5
     n_saccades_max = 121
-    n_uplet_student = 9
-    n_uplet_teacher = 18
+    n_uplet_student = 7
+    n_uplet_teacher = 15
     n_student_draws = 6
     n_teacher_draws = 3
+    n_probes = 5
 if finetune:
     n_student_draws = 0
     n_teacher_draws = 1
@@ -118,8 +120,8 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-use_synset_embeddings =  True #False # True
-index_embeddings = True # False # True
+use_synset_embeddings =  True # Falseœ
+index_embeddings = True # False
 synset_level = 4
 if supervised or pos_supervised:
     if use_synset_embeddings:
