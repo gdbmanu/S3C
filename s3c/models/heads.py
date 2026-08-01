@@ -236,36 +236,27 @@ class ABMILPosPredictor(nn.Module):
         if s.dim() == 2:
             s = s.unsqueeze(1)          # (B, emb_dim) -> (B, 1, emb_dim)
 
-        if seed_idx is not None:
-            s = s[:, :1, :]   # (B, 1, emb_dim) — garde la dim
-
-        z_was_2d = (z.dim() == 2)
-        if z_was_2d:
+        z_was_2d = z.dim() == 2
+        if z.dim() == 2:
             z = z.unsqueeze(1)          # (B, emb_dim) -> (B, 1, emb_dim)
 
-        B, k, _ = s.shape
         kp = z.shape[1]
 
         z_norm = self.z_transform(self.norm_z(z))          # (B, k', emb_dim)
 
         if seed_idx is not None:
-            s_norm = torch.stack([
-                self.seed_transform[i](self.norm_s[i](s)) for i in range(seed_idx, seed_idx+1)
-            ], dim=1)   
+            s_norm = self.seed_transform[seed_idx](self.norm_s[seed_idx](s[:, seed_idx, :])).unsqueeze(1)
+            k = 1
         else:
             s_norm = torch.stack([
                 self.seed_transform[i](self.norm_s[i](s[:, i, :])) for i in range(self.k)
             ], dim=1)                                           # (B, k, emb_dim)
+            k = self.k
 
         # Broadcast s et z sur une grille (B, k', k, emb_dim)
-        if seed_idx is  None:
-            s_exp = s_norm.unsqueeze(1).expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
-        else:
-            s_exp = s_norm.expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
-        if seed_idx is not None:
-            z_exp = z_norm.unsqueeze(2).expand(-1, -1, 1, -1)    # (B, k', 1, emb_dim)
-        else:
-            z_exp = z_norm.unsqueeze(2).expand(-1, -1, k, -1)    # (B, k', k, emb_dim)
+        s_exp = s_norm.unsqueeze(1).expand(-1, kp, -1, -1)   # (B, k', k, emb_dim)
+        z_exp = z_norm.unsqueeze(2).expand(-1, -1, k, -1)    # (B, k', k, emb_dim)
+        
         sz = torch.cat([s_exp, z_exp], dim=-1)               # (B, k', k, 2*emb_dim)
 
         # ABMIL conditionné sur chaque z, en parallèle
@@ -1822,7 +1813,10 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
         if self.pos_separation:
             for block in self.blocks:
                 views, seeds, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, seeds, l_emb, z_emb, pos)
-            pos = torch.cat([z_emb, pos], dim=1)
+            if pos is not None:
+                pos = torch.cat([z_emb, pos], dim=1)
+            else:
+                pos = z_emb
         else:
             pos = torch.cat([z_emb, pos], dim=1)
             for block in self.blocks:
