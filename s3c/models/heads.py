@@ -1465,6 +1465,7 @@ class WhatWherePosBlock(nn.Module):
         ## WHAT EMBEDDINGS
 
         self.l_norm  = nn.LayerNorm(emb_dim)
+        self.cross_l_norm  = nn.LayerNorm(emb_dim)
         self.cross_s_norm = nn.LayerNorm(emb_dim)   # sur les seeds
 
         # Cross-attention : query (Q) × seeds (K, V)
@@ -1521,7 +1522,7 @@ class WhatWherePosBlock(nn.Module):
         )
 
 
-    def forward(self, views, seeds, l, z, pos):
+    def forward(self, views, seeds, l, z, pos, detach_label=False):
         # ── Vues se transforment entre elles ──────────────────────
 
         v = self.view_norm(views)
@@ -1541,13 +1542,21 @@ class WhatWherePosBlock(nn.Module):
         
         s_cross = self.cross_s_norm(s)
         l = self.l_norm(l)
-        h_l, attn_l = self.l_cross_attn(l, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        if detach_label:
+            h_l, attn_l = self.l_cross_attn(l, s_cross.detach().clone(), s_cross.detach().clone())
+        else:
+            h_l, attn_l = self.l_cross_attn(l, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
         l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
 
         # ── z queries lisent les seeds ─────────────────────
         
         z = self.z_norm(z)
-        h_z, attn_z = self.z_cross_attn(z, s_cross, s_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        l_cross = self.cross_l_norm(l)
+        sl_cross = torch.cat([s_cross, l_cross.detach().clone()], dim=1)
+        if detach_label:
+            h_z, attn_z = self.z_cross_attn(z, sl_cross.detach().clone(), sl_cross.detach().clone())  # (B, 1, emb_dim) WHERE PATHWAY (with residual)    
+        else:
+            h_z, attn_z = self.z_cross_attn(z, sl_cross, sl_cross)  # (B, 1, emb_dim) WHERE PATHWAY (with residual)    
         z = z + h_z
         z = z + self.z_ffn(self.z_norm_ffn(z))                 # (B, 1, emb_dim)
 
@@ -1775,7 +1784,7 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
         self.norm_out = nn.LayerNorm(emb_dim)
         self.label_mask = label_mask
 
-    def forward(self, views, labels, pos, seed_idx=None):
+    def forward(self, views, labels, pos, seed_idx=None, detach_label=False):
         B = views.size(0)
         if seed_idx is None:
             seeds = self.seeds.expand(B, -1, -1).clone()
@@ -1812,7 +1821,7 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
 
         if self.pos_separation:
             for block in self.blocks:
-                views, seeds, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, seeds, l_emb, z_emb, pos)
+                views, seeds, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, seeds, l_emb, z_emb, pos, detach_label=detach_label)
             if pos is not None:
                 pos = torch.cat([z_emb, pos], dim=1)
             else:
@@ -1820,7 +1829,7 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
         else:
             pos = torch.cat([z_emb, pos], dim=1)
             for block in self.blocks:
-                views, seeds, l_emb, pos, attn_l, attn_pos = block(views, seeds, l_emb, pos)  
+                views, seeds, l_emb, pos, attn_l, attn_pos = block(views, seeds, l_emb, pos, detach_label=detach_label)  
 
         return torch.cat([seeds, l_emb, pos], dim=1) 
     

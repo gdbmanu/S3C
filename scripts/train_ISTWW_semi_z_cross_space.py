@@ -57,7 +57,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 4
+n_sab = 2
 
 k = 3 #12       # n_seeds
 n_heads = 12
@@ -90,14 +90,15 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
 supervised = True # **label** supervised
-if supervised:
+pos_supervised = True # !!
+pos_separation = True # !!
+if supervised or pos_supervised:
     pure = False
     alpha = 1e-6 #3e-7
     beta = 3e-4 # !!!!! 1e-4 #3e-5 #!! 
 else:
     pure = False
-pos_supervised = True # !!
-pos_separation = True # !!
+
 
 inv_temp = 1
 stop_gradient = False
@@ -117,7 +118,7 @@ if finetune:
 use_synset_embeddings =  True #False # True
 index_embeddings = True # False # True
 synset_level = 4
-if supervised:
+if supervised or pos_supervised:
     if use_synset_embeddings:
         label_smoothing = 0.5
     else:
@@ -131,9 +132,9 @@ abmil_seed = True
 
 
 suffix = ""
-if supervised : 
+if supervised or pos_supervised: 
     if pure: suffix = suffix + "_PURESUP"        
-    else: suffix = suffix + "_SUP"
+    elif supervised: suffix = suffix + "_SUP"
     suffix = suffix + f"_a{alpha}"
     if beta != 1e-4 : suffix = suffix + f"_b{beta}"
     label_mask = 0.8
@@ -488,7 +489,7 @@ if True: #k>1:
 
 os.makedirs(save_dir, exist_ok=True)
 
-if supervised:
+if supervised or pos_supervised:
     if finetune:
         if train_epochs == 100:
             linear_optimizer = torch.optim.AdamW([
@@ -506,7 +507,7 @@ if supervised:
             )
         ist_transformer.requires_grad_(False)
     else:
-        if train_epochs == 100:
+        if False: #train_epochs == 100:
             linear_optimizer = torch.optim.AdamW(
                 [{'params': ist_transformer.parameters(), 'lr': 1e-5},
                 {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
@@ -574,7 +575,7 @@ if train_epochs > 30:
 else:
     n_warm = 5
 if schedule:
-    if supervised:
+    if supervised or pos_supervised:
         warmup = LinearLR(linear_optimizer, start_factor=0.1, end_factor=1.0, total_iters=n_warm)
         cosine = CosineAnnealingLR(linear_optimizer, T_max=train_epochs - n_warm)
         scheduler = SequentialLR(linear_optimizer, schedulers=[warmup, cosine], milestones=[n_warm])
@@ -654,10 +655,11 @@ for epoch in range(train_epochs):
             labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            detach_label = not supervised
             if supervised or pos_supervised:
                 if n_student_draws > 0:
-                    output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, probe_targets) for i in range(n_student_draws)], dim=1)
-                output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, probe_targets) for i in range(n_teacher_draws)], dim=1)
+                    output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], labels, probe_targets, detach_label=detach_label) for i in range(n_student_draws)], dim=1)
+                output_t = torch.stack([ist_transformer(features_t[:, i*n_uplet_teacher : (i+1)*n_uplet_teacher,:], labels, probe_targets, detach_label=detach_label) for i in range(n_teacher_draws)], dim=1)
             else:
                 if n_student_draws > 0:
                     output_s = torch.stack([ist_transformer(features_s[:, i*n_uplet_student : (i+1)*n_uplet_student,:], None, probe_targets) for i in range(n_student_draws)], dim=1)
@@ -737,7 +739,7 @@ for epoch in range(train_epochs):
             
            
             ### LABEL LOSS
-            if supervised:
+            if supervised or pos_supervised:
                 if abmil_label:
                     output_t_head, _ = linear_head(seed_centers, z_label_center) # !!! 
                 else:
@@ -753,6 +755,7 @@ for epoch in range(train_epochs):
                     output_t_head, _ = linear_head(seed_centers.detach(), z_label_center.detach())
                 else:
                     output_t_head = linear_head(z_label_center.detach()) #linear_head(seed_centers.view(batch_size, k * embed_dim).detach()) #linear_head(centers.view(batch_size, k * embed_dim).detach()) #linear_head(output_t[0].detach()) + linear_head(output_t[1].detach())
+                    #output_t_head = linear_head(z_center.detach()) 
                 loss_label = criterion(output_t_head, labels)
                 loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos # !!!
 
@@ -763,7 +766,7 @@ for epoch in range(train_epochs):
                 loss_seeds += criterion(output_t_seed, labels)          
 
 
-        if not supervised:
+        if not supervised and not pos_supervised:
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
@@ -773,7 +776,7 @@ for epoch in range(train_epochs):
 
         linear_optimizer.zero_grad()
         loss_label.backward()
-        if supervised:
+        if supervised or pos_supervised:
             torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(pos_predictor.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(z_pos_predictor.parameters(), 1.0)
@@ -901,6 +904,8 @@ for epoch in range(train_epochs):
 
                         seed_centers = centers[:,:k,:]
                         z_center, _ = seeds_mlp(seed_centers) 
+                        seed_centers_sup = centers_sup[:,:k,:]
+                        z_center_sup, _ = seeds_mlp(seed_centers_sup) 
 
                         z_label_center = centers[:,k,:]
                         z_pos_centers = z_pos_predictor(centers[:,(k+1):,:])
@@ -977,8 +982,9 @@ for epoch in range(train_epochs):
                         else:
                             output_t_head = linear_head(z_label_center) #linear_head(seed_centers.view(batch_size, k * embed_dim)) #seed_centers.view(batch_size, k * embed_dim))
                             output_t_head_sup = linear_head(z_label_center_sup) #linear_head(seed_centers.view(batch_size, k * embed_dim)) #seed_centers.view(batch_size, k * embed_dim))
-                        
-                        if supervised:
+                            #output_t_head = linear_head(z_center) #linear_head(seed_centers.view(batch_size, k * embed_dim)) #seed_centers.view(batch_size, k * embed_dim))
+                            #output_t_head_sup = linear_head(z_center_sup)
+                        if supervised or pos_supervised:
                             loss_label = loss = (1 - lam) * loss_jepa + lam * loss_sigreg + loss_pos + loss_z_pos + criterion(output_t_head, labels)
                         else:
                             loss_label = criterion(output_t_head, labels)
