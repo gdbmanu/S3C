@@ -120,7 +120,7 @@ cross_integration = True # cross_draws_integration
 if finetune:
     cross_integration = False
 
-use_synset_embeddings =  True # Falseœ
+use_synset_embeddings =  True # False
 index_embeddings = True # False
 synset_level = 4
 if supervised or pos_supervised:
