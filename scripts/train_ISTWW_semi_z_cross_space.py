@@ -91,10 +91,13 @@ mu = 1               # spatial probe weight
 
 supervised = True # **label** supervised
 pos_supervised = True # !!
-pos_separation = True # !!
+pos_separation = True # WWP !!
 if supervised or pos_supervised:
     pure = False
-    alpha = 1e-6 #3e-7
+    if False: #train_epochs == 100:
+        alpha = 3e-7
+    else:
+        alpha = 1e-6 #3e-7
     beta = 3e-4 # !!!!! 1e-4 #3e-5 #!! 
 else:
     pure = False
@@ -126,7 +129,7 @@ if supervised or pos_supervised:
 else:
     label_smoothing = 0.5
 
-abmil_pos = True
+abmil_pos = False #True
 abmil_label = False
 abmil_seed = True
 
@@ -507,7 +510,7 @@ if supervised or pos_supervised:
             )
         ist_transformer.requires_grad_(False)
     else:
-        if False: #train_epochs == 100:
+        if train_epochs == 100:
             linear_optimizer = torch.optim.AdamW(
                 [{'params': ist_transformer.parameters(), 'lr': 1e-5},
                 {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
@@ -683,7 +686,10 @@ for epoch in range(train_epochs):
             
             z_label_center = centers[:,k,:]
 
-            z_pos_centers = z_pos_predictor(centers[:,(k+1):,:]) #.view(batch_size, embed_dim)
+            if abmil_pos:
+                z_pos_centers = z_pos_predictor(centers[:,(k+1):,:]) #.view(batch_size, embed_dim)
+            else:
+                z_pos_centers = z_pos_predictor(centers[:,(k+2):,:]) #.view(batch_size, embed_dim)
             # z_pos_draws = output_t[:, :, k, :] #.view(batch_size, embed_dim)
 
             loss_jepa = torch.tensor(0.).to(device)
@@ -716,7 +722,10 @@ for epoch in range(train_epochs):
 
             ### LOSS_Z_POS : z_star + z_probes ###
             if pos_supervised:
-                z_pos_targets = torch.cat([z_star.unsqueeze(1), z_probes], dim = 1)
+                if abmil_pos:
+                    z_pos_targets = torch.cat([z_star.unsqueeze(1), z_probes], dim = 1)
+                else:
+                    z_pos_targets = z_probes
                 loss_z_pos = F.mse_loss(z_pos_centers, z_pos_targets)
             else:
                 z_pos_targets = z_probes
@@ -729,12 +738,15 @@ for epoch in range(train_epochs):
             else:
                 pos_target = torch.zeros((batch_size, 2), device=device)
             
-            pos_targets = torch.cat([pos_target.unsqueeze(1), probe_targets], dim=1)    # (B, n_probes + 1, 2)  
+            if abmil_pos:
+                pos_targets = torch.cat([pos_target.unsqueeze(1), probe_targets], dim=1)    # (B, n_probes + 1, 2)
+            else:
+                pos_targets = pos_target
 
             if abmil_pos:   
                 pos_preds, _ = pos_predictor(seed_centers.clone().detach(), z_pos_targets) # !!! PAS z_pos_center !!!             
             else:
-                pos_preds = pos_predictor(z_pos_targets) # !!! PAS z_pos_center !!!
+                pos_preds = pos_predictor(centers[:,k+1,:]) #z_pos_targets) # !!! PAS z_pos_center !!!
             loss_pos = F.mse_loss(pos_preds, pos_targets)
             
            
@@ -966,12 +978,16 @@ for epoch in range(train_epochs):
                             pos_preds, _ = pos_predictor(seed_centers, z_pos_centers) 
                             pos_preds_sup, _ = pos_predictor(seed_centers, z_pos_centers_sup)
                         else:
-                            pos_preds_true = pos_predictor(z_pos_targets)     
-                            pos_preds = pos_predictor(z_pos_centers)     
-                            pos_preds_sup = pos_predictor(z_pos_centers_sup)
+                            pos_preds_true = pos_predictor(centers[:,k+1,:]).unsqueeze(1) #z_pos_targets)     
+                            pos_preds = pos_predictor(centers[:,k+1,:]).unsqueeze(1) #z_pos_centers)     
+                            pos_preds_sup = pos_predictor(centers_sup[:,k+1,:]).unsqueeze(1) #z_pos_centers_sup)
                         
-                        loss_pos_ref = F.mse_loss(pos_preds[:,1,:], pos_targets[:,1,:])
-                        loss_pos_true = F.mse_loss(pos_preds_true[:,1,:], pos_targets[:,1,:])
+                        if abmil_pos:
+                            loss_pos_ref = F.mse_loss(pos_preds[:,1,:], pos_targets[:,1,:]) 
+                            loss_pos_true = F.mse_loss(pos_preds_true[:,1,:], pos_targets[:,1,:]) 
+                        else:
+                            loss_pos_ref = torch.tensor(0.).to(device)
+                            loss_pos_true = torch.tensor(0.).to(device)
                         loss_pos = F.mse_loss(pos_preds[:,0,:], pos_targets[:,0,:])
                         loss_pos_sup = F.mse_loss(pos_preds_sup[:,0,:], pos_targets[:,0,:])
 
@@ -1003,7 +1019,8 @@ for epoch in range(train_epochs):
                         print(f"ratio sigreg/jepa = {ratio:.2f}")
                         if pos_supervised:
                             print(f"pos target : ({x_star[0].item():.3f},{y_star[0].item():.3f}), pos_pred ({pos_preds[0,0,0].item():.3f},{pos_preds[0,0,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,0,0].item():.3f},{pos_preds_sup[0,0,1].item():.3f}) ")
-                            print(f"pos probe : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,1,0].item():.3f},{pos_preds_sup[0,1,1].item():.3f}) ")
+                            if abmil_pos:
+                                print(f"pos probe : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,1,0].item():.3f},{pos_preds_sup[0,1,1].item():.3f}) ")
                         else:
                             print(f"pos target : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}) ")
                         print(f"z_pos ref error = {np.sqrt(loss_z_pos_ref.item()):.3f}")
