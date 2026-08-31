@@ -1553,6 +1553,7 @@ class WhatWherePosBlock(nn.Module):
         z = self.z_norm(z)
         l_cross = self.cross_l_norm(l)
         sl_cross = torch.cat([s_cross, l_cross.detach().clone()], dim=1)
+        # sl_cross = torch.cat([s_cross, l_cross], dim=1)
         if detach_label:
             h_z, attn_z = self.z_cross_attn(z, sl_cross.detach().clone(), sl_cross.detach().clone())  # (B, 1, emb_dim) WHERE PATHWAY (with residual)    
         else:
