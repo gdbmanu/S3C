@@ -104,7 +104,6 @@ if supervised or pos_supervised:
 else:
     pure = False
 
-
 inv_temp = 1
 stop_gradient = False
 
