@@ -183,11 +183,63 @@ def visualize_saccades(dataset, idx=0, n_views=5, zoom=1.5, std=0.3, seed=42):
     return fig
 
 
+# @torch.no_grad()
+# def compute_saliency_grid(
+#         dino_student_y,
+#         dino_teacher,
+#         img1, img2, 
+#         grid_size=11,
+#         y_min=-5/6, y_max=5/6,
+#         zoom=1,
+#         device='cuda',
+#         norm=False
+#     ):
+#     device = next(dino_student_y.parameters()).device
+
+#     # --- Préparation : force batch size = 1 ---
+#     if img1.ndim == 3:
+#         img1 = img1.unsqueeze(0)
+#     if img2.ndim == 3:
+#         img2 = img2.unsqueeze(0)
+    
+#     img1 = img1.to(device)
+#     img2 = img2.to(device)
+
+#     z1_ref = dino_teacher.forward_features(img1)[:, 0, :]      # (1, 768)
+
+#     # --- Embedding teacher (vecteur de référence) ---
+#     z2 = dino_teacher.forward_features(img2)[:, 0, :]      # (1, 768)
+#     if norm:
+#         z2_norm = F.normalize(z2, dim=-1)
+
+
+#     # --- Grille 11×11 de valeurs Y ---
+#     xs = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
+#     ys = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
+#     X, Y = torch.meshgrid(xs, ys, indexing="xy")  # X: horizontal, Y: vertical
+
+#     grid = torch.stack([X, Y], dim=-1)            # (11,11,2)  -> (x,y)
+#     grid_flat = grid.reshape(-1, 2)               # (121,2)
+
+#     # Répéter l’image pour 121 positions
+#     img1_rep = img1.expand(grid_flat.shape[0], -1, -1, -1)             # (121, 3,128,128)
+
+#     # --- Forward student sur toute la grille ---
+#     z1_batch, z_y_batch = dino_student_y(img1_rep, grid_flat, layernorm=False)          # z_y_batch shape (121, 768)
+#     if norm:
+#         z_y_batch_norm = F.normalize(z_y_batch, dim=-1)
+
+#     # --- Produit scalaire avec le vecteur enseignant ---
+#     saliency = torch.sum(z_y_batch_norm * z2_norm, dim=-1)                       # (121,)
+#     saliency = saliency.reshape(grid_size, grid_size)                  # (11, 11)
+
+#     return z1_ref, z_y_batch, z2, saliency #saliency, grid, z_y_batch.reshape(grid_size, grid_size, -1), z2
+
 @torch.no_grad()
 def compute_saliency_grid(
         dino_student_y,
         dino_teacher,
-        img1, img2, 
+        img1, img2,
         grid_size=11,
         y_min=-5/6, y_max=5/6,
         zoom=1,
@@ -201,36 +253,157 @@ def compute_saliency_grid(
         img1 = img1.unsqueeze(0)
     if img2.ndim == 3:
         img2 = img2.unsqueeze(0)
-    
     img1 = img1.to(device)
     img2 = img2.to(device)
 
-    z1_ref = dino_teacher.forward_features(img1)[:, 0, :]      # (1, 768)
+    # --- Embedding teacher ---
+    z1_ref = dino_teacher.forward_features(img1)[:, 0, :]   # (1, 768)
+    z2     = dino_teacher.forward_features(img2)[:, 0, :]   # (1, 768)
 
-    # --- Embedding teacher (vecteur de référence) ---
-    z2 = dino_teacher.forward_features(img2)[:, 0, :]      # (1, 768)
-    if norm:
-        z2_norm = F.normalize(z2, dim=-1)
-
-
-    # --- Grille 11×11 de valeurs Y ---
+    # --- Grille 11×11 ---
     xs = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
     ys = torch.linspace(y_min * zoom, y_max * zoom, grid_size, device=device)
-    X, Y = torch.meshgrid(xs, ys, indexing="xy")  # X: horizontal, Y: vertical
+    X, Y = torch.meshgrid(xs, ys, indexing="xy")
+    grid_flat = torch.stack([X, Y], dim=-1).reshape(-1, 2)  # (121, 2)
 
-    grid = torch.stack([X, Y], dim=-1)            # (11,11,2)  -> (x,y)
-    grid_flat = grid.reshape(-1, 2)               # (121,2)
+    # --- Forward student : une seule image, 121 positions simultanées ---
+    # y shape : (1, 121, 2) — B=1, K=121
+    y_batch = grid_flat.unsqueeze(0)                        # (1, 121, 2)
+    z1_batch, z_y_batch = dino_student_y(
+        img1, y_batch, layernorm=False
+    )                                                        # z_y_batch : (1, 121, 768)
+    z_y_batch = z_y_batch.squeeze(0)                        # (121, 768)
 
-    # Répéter l’image pour 121 positions
-    img1_rep = img1.expand(grid_flat.shape[0], -1, -1, -1)             # (121, 3,128,128)
-
-    # --- Forward student sur toute la grille ---
-    z1_batch, z_y_batch = dino_student_y(img1_rep, grid_flat, layernorm=False)          # z_y_batch shape (121, 768)
+    # --- Saliency ---
     if norm:
-        z_y_batch_norm = F.normalize(z_y_batch, dim=-1)
+        z_y_batch = F.normalize(z_y_batch, dim=-1)
+        z2        = F.normalize(z2,        dim=-1)
 
-    # --- Produit scalaire avec le vecteur enseignant ---
-    saliency = torch.sum(z_y_batch_norm * z2_norm, dim=-1)                       # (121,)
-    saliency = saliency.reshape(grid_size, grid_size)                  # (11, 11)
+    saliency = torch.sum(z_y_batch * z2, dim=-1)            # (121,)
+    saliency = saliency.reshape(grid_size, grid_size)        # (11, 11)
 
-    return z1_ref, z_y_batch, z2, saliency #saliency, grid, z_y_batch.reshape(grid_size, grid_size, -1), z2
+    return z1_ref, z_y_batch, z2, saliency
+
+@torch.no_grad()
+def compute_norm_grid(
+    dino_student_y,
+    img1,
+    IGUB=False,
+    grid_size=11,
+    y_min=-5/6, y_max=5/6,
+    device='cuda'
+):
+    device = next(dino_student_y.parameters()).device
+    img1   = img1.to(device)
+
+    # ── normalisation batch dim ───────────────────────────────────────
+    if img1.ndim == 3:
+        img1 = img1.unsqueeze(0)          # (1, C, H, W)
+    B = img1.shape[0]
+
+    # ── grille de positions ───────────────────────────────────────────
+    xs       = torch.linspace(y_min, y_max, grid_size, device=device)
+    ys       = torch.linspace(y_min, y_max, grid_size, device=device)
+    X, Y     = torch.meshgrid(xs, ys, indexing="xy")
+    grid     = torch.stack([X, Y], dim=-1)     # (G, G, 2)
+    grid_flat = grid.reshape(-1, 2)            # (G*G, 2)
+    G2       = grid_flat.shape[0]              # G*G = 121
+
+    y_batch = grid_flat.unsqueeze(0) 
+    # ── forward ──────────────────────────────────────────────────────
+    _, z_y = dino_student_y(img1, y_batch, layernorm=False)  # (B*G*G, D)
+    if IGUB:
+        z_center = z_y[:, G2//2 + 1, :].unsqueeze(1).unsqueeze(1)
+
+    # ── reshape → (B, G, G, D) ───────────────────────────────────────
+    D      = z_y.shape[-1]
+    z_y    = z_y.reshape(B, grid_size, grid_size, D)              # (B, G, G, D)
+
+    # ── saliency = norme L2 par position ─────────────────────────────
+    if not IGUB:
+        saliency = torch.linalg.norm(z_y, dim=-1)                     # (B, G, G)
+    else:
+        saliency = torch.sum(z_y * z_center, dim=-1)
+
+    # ── position maximale par image ───────────────────────────────────
+    # argmax sur la grille aplatie
+    flat_idx = saliency.reshape(B, -1).argmax(dim=1)              # (B,)
+    i_star   = flat_idx // grid_size                              # ligne   (B,)
+    j_star   = flat_idx  % grid_size                              # colonne (B,)
+    x_star   = xs[j_star]                                         # (B,) — axe x = colonnes
+    y_star   = ys[i_star]                                         # (B,) — axe y = lignes
+
+    return {
+        "grid"     : grid,                    # (G, G, 2)
+        "z_y"      : z_y,                     # (B, G, G, D)
+        "saliency" : saliency,                # (B, G, G)
+        "i_star"   : i_star,                  # (B,) indices ligne
+        "j_star"   : j_star,                  # (B,) indices colonne
+        "x_star"   : x_star,                  # (B,) coordonnée x optimale
+        "y_star"   : y_star,                  # (B,) coordonnée y optimale
+    }
+
+
+@torch.no_grad()
+def laplacian_2d_with_maxima(
+        saliency_map,
+        n_maxima=5,
+        y_min=None, y_max=None,
+    ):
+    """
+    saliency_map : (B, G, G)
+    n_maxima     : nombre de maxima à retourner
+    y_min, y_max : bornes de la grille. Si None, calculées depuis G :
+                   y_min = -1 + 2/(G+1), y_max = 1 - 2/(G+1)
+    Retourne :
+        lap      : (B, G, G)        — carte laplacienne
+        coords   : (B, n_maxima, 2) — coordonnées (x,y) des maxima décroissants
+        scores   : (B, n_maxima)    — valeurs correspondantes
+    """
+    B, G, _ = saliency_map.shape
+    device   = saliency_map.device
+    dtype    = saliency_map.dtype
+
+    # ── Bornes de la grille ───────────────────────────────────────────
+    if y_min is None:
+        y_min = -1.0 + 2.0 / (G + 1)
+    if y_max is None:
+        y_max =  1.0 - 2.0 / (G + 1)
+
+    # ── Grille normalisée ─────────────────────────────────────────────
+    xs   = torch.linspace(y_min, y_max, G, device=device, dtype=dtype)
+    ys   = torch.linspace(y_min, y_max, G, device=device, dtype=dtype)
+    X, Y = torch.meshgrid(xs, ys, indexing="xy")
+    grid = torch.stack([X, Y], dim=-1)            # (G, G, 2)
+
+    # ── Laplacien avec padding miroir ────────────────────────────────
+    kernel = torch.tensor([
+        [-0.125, -0.125, -0.125],
+        [-0.125,  1.0,  -0.125],
+        [-0.125, -0.125, -0.125],
+    ], device=device, dtype=dtype)
+
+    # Padding reflect (miroir) sur 1 pixel de chaque côté
+    x_padded = F.pad(
+        saliency_map.unsqueeze(1),   # (B, 1, G, G)
+        pad=(1, 1, 1, 1),
+        mode='reflect'
+    )                                             # (B, 1, G+2, G+2)
+
+    # Convolution sans padding (déjà géré par reflect)
+    lap = F.conv2d(
+        x_padded,
+        kernel.view(1, 1, 3, 3),
+        padding=0                                 # pas de padding additionnel
+    ).squeeze(1)                                  # (B, G, G)
+
+    # ── Maxima ────────────────────────────────────────────────────────
+    lap_flat         = lap.reshape(B, -1)         # (B, G*G)
+    scores, flat_idx = torch.topk(lap_flat, k=n_maxima, dim=-1)
+
+    iy     = flat_idx // G                        # (B, n_maxima)
+    ix     = flat_idx %  G                        # (B, n_maxima)
+    coords = grid[iy, ix]                         # (B, n_maxima, 2)
+
+    return lap, coords, scores
+

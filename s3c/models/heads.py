@@ -1572,6 +1572,131 @@ class WhatWherePosBlock(nn.Module):
             attn_pos = None
 
         return v, s, l, z, pos, attn_l, attn_z, attn_pos
+    
+class WhatWherePosBlock2(nn.Module):
+    """
+    Un bloc = 
+      - cross-attention query → seeds (query lisent les seeds transformées)
+      - pas de self-attention sur les query
+    """
+
+    def __init__(self, emb_dim=768, n_heads=12, 
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 l_emb_detach=False, n_blocks=2):
+        super().__init__()
+
+        ## VIEWS
+
+        self.view_norm = nn.LayerNorm(emb_dim)
+
+        self.view_self_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.view_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.view_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## WHAT EMBEDDINGS
+
+        self.l_norm  = nn.LayerNorm(emb_dim)
+        self.cross_s_norm = nn.LayerNorm(emb_dim)   # sur les seeds
+        self.cross_l_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.l_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.l_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.l_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        ## WHERE EMBEDDINGS
+
+        self.z_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.z_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.z_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.z_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+        ## POS EMBEDDINGS
+
+        self.pos_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.pos_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.pos_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.pos_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+
+    def forward(self, views, l, z, pos):
+        # ── Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        v = v + h_views
+        v = v + self.view_ffn(self.view_norm_ffn(v))
+
+        # ── label lisent les vues transformées ─────────────────────
+        v_cross = self.cross_v_norm(v)
+        l = self.l_norm(l)
+        h_l, attn_l = self.l_cross_attn(l, v_cross, v_cross)  # (B, 1, emb_dim) WHAT PATHWAY (w/o residual)    
+        l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
+
+        # ── z queries lisent les seeds ─────────────────────
+        
+        z = self.z_norm(z)
+        l_cross = self.cross_l_norm(l)
+        vl_cross = torch.cat([v_cross, l_cross.detach().clone()], dim=1)
+        h_z, attn_z = self.z_cross_attn(z, vl_cross, vl_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+        z = z + h_z
+        z = z + self.z_ffn(self.z_norm_ffn(z))                 # (B, 1, emb_dim)
+
+        # ── pos queries lisent les seeds ─────────────────────
+        
+        if pos is not None:
+            pos = self.pos_norm(pos)
+            h_pos, attn_pos = self.pos_cross_attn(pos, v_cross, v_cross)  # (B, 1, emb_dim) WHERE PATHWAY (w/o residual)    
+            pos = pos + h_pos
+            pos = pos + self.pos_ffn(self.pos_norm_ffn(pos))                 # (B, 1, emb_dim)
+        else:
+            attn_pos = None
+
+        return v, l, z, pos, attn_l, attn_z, attn_pos
 
 class WhereIterativeSeedTransformer(nn.Module):
     def __init__(self, emb_dim=768,
@@ -1833,6 +1958,101 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
                 views, seeds, l_emb, pos, attn_l, attn_pos = block(views, seeds, l_emb, pos, detach_label=detach_label)  
 
         return torch.cat([seeds, l_emb, pos], dim=1) 
+    
+class WhatWherePosIterativeSeedTransformer2(nn.Module):
+    def __init__(self, emb_dim=768,
+                 n_heads=12, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 n_classes=1000, frozen_emb = True,
+                 label_smoothing=0.1, label_mask = 0.2):
+        super().__init__()
+        
+        self.blocks = nn.ModuleList([
+            WhatWherePosBlock2(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+        ])
+        
+        self.pre_norm_l  = nn.LayerNorm(emb_dim)   
+        self.pre_l_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(label_smoothing), # !!!! increase label embedding entropy
+        )
+
+        self.pre_norm_z  = nn.LayerNorm(emb_dim)   
+        self.pre_z_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout), 
+        )
+
+        self.pre_pos_ffn = nn.Sequential(
+            nn.Linear(2, 256),
+            nn.GELU(),
+            nn.Linear(256, emb_dim),
+            nn.Dropout(0.1), 
+        )
+        self.pre_pos_norm  = nn.LayerNorm(emb_dim)   
+
+        # label Token — embedding appris     
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+
+        self.pretrained_embeddings = pretrained_embeddings is not None 
+        self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape            
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+        else:
+            frozen_emb = False
+        # Optionnel : geler les embeddings  
+        if frozen_emb:
+            self.label_embedding.weight.requires_grad = False
+
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.label_mask = label_mask
+
+    def forward(self, views, labels, pos):
+        B = views.size(0)
+
+        # LABELS pre-processing (B, emb_dim)
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < self.label_mask
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls_, l_emb)
+        elif labels is not None:
+            l_emb = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
+        l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1)
+
+        # Z_POS pre-processing (B, emb_dim)
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < 0.2 #self.label_mask
+            z_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
+            z_emb  = torch.where(mask.unsqueeze(1), cls_, z_emb)
+        elif labels is not None:
+            z_emb = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            z_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
+        z_emb = self.pre_norm_z(self.pre_z_ffn(z_emb)).unsqueeze(1)
+
+        # POS input (B, n_probe, emb_dim)
+        if pos is not None:
+            pos = self.pre_pos_norm(self.pre_pos_ffn(pos))     
+
+        for block in self.blocks:
+            views, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, l_emb, z_emb, pos)
+        if pos is not None:
+            pos = torch.cat([z_emb, pos], dim=1)
+        else:
+            pos = z_emb
+        
+
+        return torch.cat([l_emb, pos], dim=1) 
     
 
 class DualPredictor(nn.Module):
