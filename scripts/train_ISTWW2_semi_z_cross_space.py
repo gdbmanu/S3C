@@ -64,7 +64,7 @@ n_saccades_max = 30
 n_uplet_teacher = 15
 n_probes = 3
 
-orig = False
+orig = True
 grid = False
 curriculum = False
 finetune = False
