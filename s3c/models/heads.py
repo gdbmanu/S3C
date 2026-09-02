@@ -2044,6 +2044,7 @@ class WhatWherePosIterativeSeedTransformer2(nn.Module):
         if pos is not None:
             pos = self.pre_pos_norm(self.pre_pos_ffn(pos))     
 
+        # MAIN LOOP
         for block in self.blocks:
             views, l_emb, z_emb, pos, attn_l, attn_z, attn_pos = block(views, l_emb, z_emb, pos)
         if pos is not None:
