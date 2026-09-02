@@ -1604,9 +1604,9 @@ class WhatWherePosBlock2(nn.Module):
         )
 
         ## WHAT EMBEDDINGS
+        self.cross_v_norm  = nn.LayerNorm(emb_dim)
 
         self.l_norm  = nn.LayerNorm(emb_dim)
-        self.cross_s_norm = nn.LayerNorm(emb_dim)   # sur les seeds
         self.cross_l_norm  = nn.LayerNorm(emb_dim)
 
         # Cross-attention : query (Q) × seeds (K, V)

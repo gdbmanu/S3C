@@ -61,7 +61,7 @@ n_sab = 2
 n_heads = 12
 
 n_saccades_max = 30 
-n_uplet_teacher = 5
+n_uplet_teacher = 15
 n_probes = 3
 
 orig = False
@@ -81,7 +81,7 @@ pos_supervised = True # !!
 pos_separation = True # WWP !!
 pure = False
 alpha = 1e-6 #3e-7
-beta = 1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
+beta = 1e-6 #1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
 
 inv_temp = 1
 stop_gradient = False
@@ -431,10 +431,8 @@ if schedule:
 log_interval = 100
 
 history = {"epoch": [], "batch": [], "loss": [],
-        "loss_label": [], "loss_pos_true": [], "loss_pos_ref": [], "loss_z_pos_ref": [], 
+        "loss_label": [], "loss_z_pos_ref": [], 
         "loss_pos": [], "loss_z_pos": [], "loss_pos_sup": [], "loss_z_pos_sup": []}
-for j in range(k):
-    history[f"classif {j}"] = []
 history[f"classif"] = []
 history[f"sup classif"] = []
 
@@ -643,8 +641,8 @@ for epoch in range(train_epochs):
 
                     if n_val == 0:
                         if pos_supervised:
-                            print(f"pos target : ({x_star[0].item():.3f},{y_star[0].item():.3f}), pos_pred ({pos_preds[0,0,0].item():.3f},{pos_preds[0,0,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,0,0].item():.3f},{pos_preds_sup[0,0,1].item():.3f}) ")
-                            print(f"pos probe : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,1,0].item():.3f},{pos_preds_sup[0,1,1].item():.3f}) ")
+                            print(f"pos target : ({x_star[0].item():.3f},{y_star[0].item():.3f}), pos_pred ({pos_preds[0,0].item():.3f},{pos_preds[0,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,0].item():.3f},{pos_preds_sup[0,1].item():.3f}) ")
+                            #print(f"pos probe : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,1,0].item():.3f},{pos_preds_sup[0,1,1].item():.3f}) ")
                         else:
                             print(f"pos target : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}) ")
                         print(f"z_pos ref error = {np.sqrt(loss_z_pos_ref.item()):.3f}")
