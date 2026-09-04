@@ -64,14 +64,14 @@ n_saccades_max = 30
 n_uplet_teacher = 15
 n_probes = 3
 
-orig = True
-grid = False
+orig = False
+grid = True
 curriculum = False
 finetune = False
 
 if grid:
     n_saccades_max = 121
-    n_uplet_teacher = 18
+    n_uplet_teacher = 30
 
 train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
