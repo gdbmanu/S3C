@@ -80,9 +80,10 @@ mu = 1               # spatial probe weight
 pos_supervised = True # !!
 pos_separation = True # WWP !!
 pure = False
-alpha = 3e-7
+alpha = 1e-6
 beta = 1e-6 #1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
-gamma = 1e-7
+gamma = 1e-5
+delta = 3e-7
 
 inv_temp = 1
 stop_gradient = False
@@ -100,6 +101,7 @@ if pure: suffix = suffix + "_PURESUP"
 suffix = suffix + f"_a{alpha}"
 if beta != 1e-4 : suffix = suffix + f"_b{beta}"
 suffix = suffix + f"_c{gamma}"
+suffix = suffix + f"_d{delta}"
 label_mask = 0.8
 
 if pos_supervised:
@@ -393,7 +395,7 @@ if finetune:
 else:
     if train_epochs == 100:
         linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 1e-5},
+            [{'params': ist_transformer.parameters(), 'lr': delta}, #1e-5},
             {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
@@ -401,7 +403,7 @@ else:
         )
     else:
         linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': 3e-5}, #3e-6},
+            [{'params': ist_transformer.parameters(), 'lr': delta}, #3e-5}, #3e-6},
             {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],

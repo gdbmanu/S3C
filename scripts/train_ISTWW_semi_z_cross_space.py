@@ -98,7 +98,7 @@ if supervised or pos_supervised:
         alpha = 3e-7
     else:
         alpha = 1e-6 #3e-7
-    beta = 1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
+    beta = 1e-6 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
 else:
     pure = False
 
@@ -512,7 +512,7 @@ if supervised or pos_supervised:
     else:
         if train_epochs == 100:
             linear_optimizer = torch.optim.AdamW(
-                [{'params': ist_transformer.parameters(), 'lr': 1e-5},
+                [{'params': ist_transformer.parameters(), 'lr': 3e-6}, #1e-5},
                 {'params': draws_attention.parameters(),       'lr': 3e-5}, #1e-5},
                 {'params': z_pos_predictor.parameters(),       'lr': 1e-5}, #beta}, #1e-5},
                 {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
