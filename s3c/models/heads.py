@@ -2028,9 +2028,9 @@ class WhatWherePosIterativeSeedTransformer2(nn.Module):
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
         l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1)
 
-        # Z_POS pre-processing (B, emb_dim)
+        # Z_POS pre-processing (B, emb_dim)label_mask
         if labels is not None and self.training:
-            mask   = torch.rand(B, device=views.device) < 0.2 #self.label_mask
+            mask   = torch.rand(B, device=views.device) < self.label_mask
             z_emb  = self.label_embedding(labels)  # (B, emb_dim)
             cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
             z_emb  = torch.where(mask.unsqueeze(1), cls_, z_emb)
