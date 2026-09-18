@@ -44,7 +44,7 @@ from datetime import datetime
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 128 #256
+batch_size = 128 #256 #
 num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -56,7 +56,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 4 #2
+n_sab = 4 #2 #
 
 n_heads = 12
 
@@ -78,7 +78,7 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
 pos_supervised = True # !!
-alpha = 1e-6
+alpha = 1e-5
 delta = 3e-7
 
 inv_temp = 1
@@ -429,7 +429,7 @@ for epoch in range(train_epochs):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], labels) 
 
-            loss = F.mse_loss(output_t, z_star)
+            loss = F.mse_loss(output_t[:,0,:], z_star)
            
             if use_synset_embeddings:
                 labels = mem_labels
@@ -513,8 +513,8 @@ for epoch in range(train_epochs):
                         output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], None) 
                         output_t_sup = ist_transformer(features_t[:, :n_uplet_teacher,:], labels) 
 
-                        loss = F.mse_loss(output_t, z_star)
-                        loss_sup = F.mse_loss(output_t_sup, z_star)
+                        loss = F.mse_loss(output_t[:,0,:], z_star)
+                        loss_sup = F.mse_loss(output_t_sup[:,0,:], z_star)
                         
                         if use_synset_embeddings:
                             labels = mem_labels
@@ -532,8 +532,8 @@ for epoch in range(train_epochs):
                     
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
-
                     correct += (preds == labels).sum().item()
+
                     running_label += loss_label.item()
                     running_z_pos += loss.item()
                     running_z_pos_sup += loss_sup.item()
