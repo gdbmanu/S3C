@@ -69,8 +69,8 @@ n_student_draws = 4
 n_teacher_draws = 3
 n_probes = 3
 
-orig = False
-grid = True
+orig = True
+grid = False
 curriculum = False
 finetune = False
 
@@ -100,7 +100,7 @@ if supervised or pos_supervised:
         alpha = 3e-7
     else:
         alpha = 1e-6 #3e-7
-    beta = 1e-6 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
+    beta = 3e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
 else:
     pure = False
 
