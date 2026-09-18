@@ -1576,8 +1576,7 @@ class WhatWherePosBlock(nn.Module):
 class WhatWherePosBlock2(nn.Module):
     """
     Un bloc = 
-      - cross-attention query → seeds (query lisent les seeds transformées)
-      - pas de self-attention sur les query
+      - cross-attention query → NO SEEDS!!
     """
 
     def __init__(self, emb_dim=768, n_heads=12, 
@@ -1697,6 +1696,74 @@ class WhatWherePosBlock2(nn.Module):
             attn_pos = None
 
         return v, l, z, pos, attn_l, attn_z, attn_pos
+
+
+class WhatBlock(nn.Module):
+    """
+    Un bloc = 
+      - cross-attention query → NO SEEDS!
+      - pas de self-attention sur les query
+    """
+
+    def __init__(self, emb_dim=768, n_heads=12, 
+                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 l_emb_detach=False, n_blocks=2):
+        super().__init__()
+
+        ## VIEWS
+
+        self.view_norm = nn.LayerNorm(emb_dim)
+
+        self.view_self_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+
+        self.view_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.view_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim), 
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim), 
+            nn.Dropout(dropout),
+        )
+
+        ## WHAT EMBEDDINGS
+        self.cross_v_norm  = nn.LayerNorm(emb_dim)
+
+        self.l_norm  = nn.LayerNorm(emb_dim)
+        self.cross_l_norm  = nn.LayerNorm(emb_dim)
+
+        # Cross-attention : query (Q) × seeds (K, V)
+        self.l_cross_attn = nn.MultiheadAttention(
+            emb_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        
+        self.l_norm_ffn = nn.LayerNorm(emb_dim)
+
+        self.l_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, views, l):
+        # ── Vues se transforment entre elles ──────────────────────
+
+        v = self.view_norm(views)
+        h_views, _ = self.view_self_attn(v, v, v)
+        v = v + h_views
+        v = v + self.view_ffn(self.view_norm_ffn(v))
+
+        # ── label lisent les vues transformées ─────────────────────
+        v_cross = self.cross_v_norm(v)
+        l = self.l_norm(l)
+        h_l, attn_l = self.l_cross_attn(l, v_cross, v_cross)  # (B, 1, emb_dim) WHAT PATHWAY (w/o residual)    
+        l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
+
+        return v, l, attn_l
 
 class WhereIterativeSeedTransformer(nn.Module):
     def __init__(self, emb_dim=768,
@@ -1959,7 +2026,7 @@ class WhatWherePosIterativeSeedTransformer(nn.Module):
 
         return torch.cat([seeds, l_emb, pos], dim=1) 
     
-class WhatWherePosIterativeSeedTransformer2(nn.Module):
+class WhatWherePosTransformer(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
                  n_classes=1000, frozen_emb = True,
@@ -2055,6 +2122,63 @@ class WhatWherePosIterativeSeedTransformer2(nn.Module):
 
         return torch.cat([l_emb, pos], dim=1) 
     
+class WhatTransformer(nn.Module):
+    def __init__(self, emb_dim=768,
+                 n_heads=12, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 n_classes=1000, frozen_emb = True,
+                 label_smoothing=0.1, label_mask = 0.2):
+        super().__init__()
+        
+        self.blocks = nn.ModuleList([
+            WhatBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+        ])
+        
+        self.pre_norm_l  = nn.LayerNorm(emb_dim)   
+        self.pre_l_ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(label_smoothing), # !!!! increase label embedding entropy
+        )
+
+        # label Token — embedding appris     
+        self.cls_token  = nn.Parameter(torch.randn(1, 1, emb_dim))
+
+        self.pretrained_embeddings = pretrained_embeddings is not None 
+        self.label_embedding = nn.Embedding(n_classes, emb_dim)
+        if pretrained_embeddings is not None:
+            n_classes, label_emb_dim = pretrained_embeddings.shape            
+            self.label_embedding.weight.data.copy_(pretrained_embeddings)
+        else:
+            frozen_emb = False
+        # Optionnel : geler les embeddings  
+        if frozen_emb:
+            self.label_embedding.weight.requires_grad = False
+
+        self.norm_out = nn.LayerNorm(emb_dim)
+        self.label_mask = label_mask
+
+    def forward(self, views, labels):
+        B = views.size(0)
+
+        # LABELS pre-processing (B, emb_dim)
+        if labels is not None and self.training:
+            mask   = torch.rand(B, device=views.device) < self.label_mask
+            l_emb  = self.label_embedding(labels)  # (B, emb_dim)
+            cls_   = self.cls_token.expand(B, -1, -1).squeeze(1)
+            l_emb  = torch.where(mask.unsqueeze(1), cls_, l_emb)
+        elif labels is not None:
+            l_emb = self.label_embedding(labels)  # (B, emb_dim)
+        else:
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
+        l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1) 
+
+        # MAIN LOOP
+        for block in self.blocks:
+            views, l_emb, attn_l = block(views, l_emb)
+
+        return l_emb
 
 class DualPredictor(nn.Module):
     def __init__(self, emb_dim=768, hidden_dim=256):

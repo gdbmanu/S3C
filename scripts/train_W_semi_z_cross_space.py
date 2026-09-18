@@ -28,7 +28,7 @@ import clip
 from torchvision.models import ResNet50_Weights
 
 
-from s3c.models.heads import WhatWherePosTransformer, AttentionPooling #FovealSetTransformer
+from s3c.models.heads import WhatTransformer, AttentionPooling #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.models.heads import  PosPredictor
 from s3c.utils.training import get_parent_synset
@@ -44,7 +44,7 @@ from datetime import datetime
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 256
+batch_size = 128 #256
 num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -56,7 +56,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 2
+n_sab = 4 #2
 
 n_heads = 12
 
@@ -78,11 +78,7 @@ lam = 0.05           # λ : trade-off JEPA / SIGReg
 mu = 1               # spatial probe weight
 
 pos_supervised = True # !!
-pos_separation = True # WWP !!
-pure = False
 alpha = 1e-6
-beta = 1e-6 #1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
-gamma = 1e-5
 delta = 3e-7
 
 inv_temp = 1
@@ -98,10 +94,7 @@ else:
 label_mask = 0.2
 
 suffix = ""
-if pure: suffix = suffix + "_PURESUP"        
 suffix = suffix + f"_a{alpha}"
-if beta != 1e-4 : suffix = suffix + f"_b{beta}"
-suffix = suffix + f"_c{gamma}"
 suffix = suffix + f"_d{delta}"
 suffix = suffix + f'_mask{label_mask}'
 
@@ -127,11 +120,9 @@ if index_embeddings:
 if use_synset_embeddings:
     suffix = suffix + f"_SYNSET{synset_level}"
 
-if pos_separation: suffix = suffix + '_SEPAR'
-
 if orig: suffix = suffix + "_ORIG"
 
-save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_ISTWW2_sab{n_sab}_{suffix}_t{n_uplet_teacher}_space"
+save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_W_sab{n_sab}_{suffix}_t{n_uplet_teacher}_space"
 
 # Monter le dossier distant
 local=True
@@ -243,7 +234,7 @@ if use_synset_embeddings:
     }, f'imagenet_synset_{synset_level}_embeddings.pt')
 
     
-    ist_transformer = WhatWherePosTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
+    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
                                                     n_classes=n_synsets, 
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
@@ -267,26 +258,8 @@ else:
     else:
         emb = label_embeddings
     
-    ist_transformer = WhatWherePosTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
+    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
-
-
-
-pos_predictor = nn.Sequential(
-            nn.LayerNorm(embed_dim),  
-            nn.Linear(embed_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 2),
-        )
-
-z_pos_predictor = nn.Sequential(
-            nn.LayerNorm(embed_dim),  
-            nn.Linear(embed_dim, 4 * embed_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(4 * embed_dim, embed_dim),
-            nn.Dropout(0.1), # increase label embedding entropy
-        )
 
 # LINEAR PROBE
 
@@ -294,6 +267,7 @@ linear_head = nn.Sequential(
                 nn.LayerNorm(embed_dim),                  
                 nn.Linear(embed_dim, 1000),
             )
+
 
 if curriculum or finetune:
     epoch_ist = 30
@@ -315,22 +289,6 @@ if curriculum or finetune:
     state_dict = checkpoint["linear_head"]
     missing, unexpected = linear_head.load_state_dict(state_dict, strict=False)
     print("➡️ Poids chargés (linear_head).")
-    print("❗ Paramètres manquants :", missing)
-    print("⚠️ Paramètres inattendus :", unexpected)
-
-    if "pos_predictor" not in checkpoint:
-        raise KeyError(f"Aucune clé 'pos_predictor' trouvée dans {checkpoint_path}")
-    state_dict = checkpoint["pos_predictor"]
-    missing, unexpected = pos_predictor.load_state_dict(state_dict, strict=False)
-    print("➡️ Poids chargés (pos_predictor).")
-    print("❗ Paramètres manquants :", missing)
-    print("⚠️ Paramètres inattendus :", unexpected)
-
-    if "z_pos_predictor" not in checkpoint:
-        raise KeyError(f"Aucune clé 'z_pos_predictor' trouvée dans {checkpoint_path}")
-    state_dict = checkpoint["z_pos_predictor"]
-    missing, unexpected = z_pos_predictor.load_state_dict(state_dict, strict=False)
-    print("➡️ Poids chargés (z_pos_predictor).")
     print("❗ Paramètres manquants :", missing)
     print("⚠️ Paramètres inattendus :", unexpected)
 
@@ -369,47 +327,28 @@ ist_transformer.train()
 linear_head.to(device)
 linear_head.train()   
 
-pos_predictor.to(device)
-pos_predictor.train()
-
-z_pos_predictor.to(device)
-z_pos_predictor.train()
-
 os.makedirs(save_dir, exist_ok=True)
 
 if finetune:
-    if train_epochs == 100:
-        linear_optimizer = torch.optim.AdamW([
-            {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=3e-4, #0.04,  
-        )            
-    else:
-        linear_optimizer = torch.optim.AdamW([
-            {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=1e-3, #0.04,  
-        )
+    linear_optimizer = torch.optim.AdamW([
+        {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+        weight_decay=3e-4, #0.04,  
+    )            
     ist_transformer.requires_grad_(False)
 else:
-    if train_epochs == 100:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': delta}, #1e-5},
-            {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=3e-4, #0.04,  
-        )
+    if train_epochs >= 100:
+        weight_decay=3e-4
     else:
-        linear_optimizer = torch.optim.AdamW(
-            [{'params': ist_transformer.parameters(), 'lr': delta}, #3e-5}, #3e-6},
-            {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
-            {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
-            {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
-            weight_decay=1e-3, #0.04,  
-        )
+        weight_decay=1e-3,
+    optimizer = torch.optim.AdamW(
+        [{'params': ist_transformer.parameters(), 'lr': delta}], #1e-5},
+        weight_decay=weight_decay, #0.04,  
+    )
+    linear_optimizer = torch.optim.AdamW(
+        [{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
+        weight_decay=weight_decay, #0.04,  
+    )
+    
 
 
 #scaler = torch.cuda.amp.GradScaler()
@@ -436,8 +375,8 @@ if schedule:
 log_interval = 100
 
 history = {"epoch": [], "batch": [], "loss": [],
-        "loss_label": [], "loss_z_pos_ref": [], 
-        "loss_pos": [], "loss_z_pos": [], "loss_pos_sup": [], "loss_z_pos_sup": []}
+        "loss_label": [],  
+        "loss_z_pos": [], "loss_z_pos_sup": []}
 history[f"classif"] = []
 history[f"sup classif"] = []
 
@@ -479,58 +418,34 @@ for epoch in range(train_epochs):
         perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
 
         b_teacher = n_uplet_teacher
-        idx_t = perms[:, :b_teacher] 
-        b_probes = b_teacher + n_probes
-        idx_probes = perms[:, b_teacher:b_probes] 
-        assert b_probes <= n_saccades_max
+        idx_t = perms[:, :b_teacher]
 
         features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
-
-        x_probes = sxs[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
-        y_probes = sys_[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
-        probe_targets = torch.stack([x_probes, y_probes], dim=2)                    # (B, n_probes, 2) 
-        z_probes = features[torch.arange(batch_size).unsqueeze(1), idx_probes, :].to(device)
 
         if use_synset_embeddings:
             mem_labels = labels
             labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], labels, probe_targets) 
+            output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], labels) 
+
+            loss = F.mse_loss(output_t, z_star)
            
             if use_synset_embeddings:
                 labels = mem_labels
            
             ### LABEL LOSS           
-            output_t_head = linear_head(output_t[:,0,:]) 
-            loss_label = criterion(output_t_head, labels) 
+            output_t_head = linear_head(output_t[:,0,:].detach().clone()) 
+            loss_label = criterion(output_t_head, labels)
 
-            ### LOSS_POS : (x,y) positions ###
-            pos_preds = pos_predictor(output_t[:,1,:])
-            if pos_supervised:
-                pos_target = torch.stack([x_star, y_star], dim=1)                           # (B, 2) 
-            else:
-                pos_target = torch.zeros((batch_size, 2), device=device)
-            
-            loss_pos = F.mse_loss(pos_preds, pos_target)
-            
-
-            ### LOSS_Z_POS : z_star + z_probes ###
-            z_pos_centers = z_pos_predictor(output_t[:,1:,:]) # !!!!
-            z_pos_targets = torch.cat([z_star.unsqueeze(1), z_probes], dim = 1)
-            loss_z_pos = F.mse_loss(z_pos_centers, z_pos_targets)
-
-            if pure:
-                loss = loss_label 
-            else:
-                loss = loss_pos + loss_z_pos + loss_label 
-
+        if not finetune:
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
+            optimizer.step()
 
         linear_optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(ist_transformer.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(pos_predictor.parameters(), 1.0)
-        torch.nn.utils.clip_grad_norm_(z_pos_predictor.parameters(), 1.0)
+        loss_label.backward()
         linear_optimizer.step()
 
         total_loss += loss.item()
@@ -539,8 +454,6 @@ for epoch in range(train_epochs):
 
             ist_transformer.eval()
             linear_head.eval()
-            pos_predictor.eval()
-            z_pos_predictor.eval()
 
             print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
             history["epoch"].append(epoch + 1)
@@ -552,10 +465,7 @@ for epoch in range(train_epochs):
             total = 0
             correct = 0.0
             running_label = 0.0
-            running_z_pos_ref = 0.0
-            running_pos = 0.0
             running_z_pos = 0.0
-            running_pos_sup = 0.0
             running_z_pos_sup = 0.0
             val_iter = iter(val_loader)
 
@@ -592,24 +502,19 @@ for epoch in range(train_epochs):
 
                     b_teacher = n_uplet_teacher
                     idx_t = perms[:, :b_teacher] 
-                    b_probes = b_teacher + n_probes
-                    idx_probes = perms[:, b_teacher:b_probes] 
-                    assert b_probes <= n_saccades_max
 
                     features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
-
-                    x_probes = sxs[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
-                    y_probes = sys_[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
-                    probe_targets = torch.stack([x_probes, y_probes], dim=2)                    # (B, n_probes, 2) 
-                    z_probes = features[torch.arange(batch_size).unsqueeze(1), idx_probes, :].to(device)
 
                     if use_synset_embeddings:
                         mem_labels = labels
                         labels = label_to_synset_tensor[labels]   # (B,) — conversion immédiate
 
                     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], None, probe_targets) 
-                        output_t_sup = ist_transformer(features_t[:, :n_uplet_teacher,:], labels, probe_targets) 
+                        output_t = ist_transformer(features_t[:, :n_uplet_teacher,:], None) 
+                        output_t_sup = ist_transformer(features_t[:, :n_uplet_teacher,:], labels) 
+
+                        loss = F.mse_loss(output_t, z_star)
+                        loss_sup = F.mse_loss(output_t_sup, z_star)
                         
                         if use_synset_embeddings:
                             labels = mem_labels
@@ -620,54 +525,18 @@ for epoch in range(train_epochs):
                         loss_label = criterion(output_t_head, labels)
                         loss_label_sup = criterion(output_t_head_sup, labels)
 
-                        ### LOSS_POS : (x,y) positions ###
-                        pos_preds = pos_predictor(output_t[:,1,:])
-                        pos_preds_sup = pos_predictor(output_t_sup[:,1,:])
-                        if pos_supervised:
-                            pos_target = torch.stack([x_star, y_star], dim=1)                           # (B, 2) 
-                        else:
-                            pos_target = torch.zeros((batch_size, 2), device=device)
-                        
-                        loss_pos = F.mse_loss(pos_preds, pos_target)
-                        loss_pos_sup = F.mse_loss(pos_preds_sup, pos_target)
-                        
-                        ### LOSS_Z_POS : z_star + z_probes ###
-                        z_pos_centers = z_pos_predictor(output_t[:,1:,:]) # !!!!
-                        z_pos_centers_sup = z_pos_predictor(output_t_sup[:,1:,:]) # !!!!
-                        z_pos_targets = torch.cat([z_star.unsqueeze(1), z_probes], dim = 1)
-                        loss_z_pos_ref = F.mse_loss(z_pos_centers[:,1,:], z_pos_targets[:,1,:])
-                        loss_z_pos = F.mse_loss(z_pos_centers[:,0,:], z_pos_targets[:,0,:])
-                        loss_z_pos_sup = F.mse_loss(z_pos_centers_sup[:,0,:], z_pos_targets[:,0,:])
-
-                        if pure:
-                            loss = loss_label 
-                        else:
-                            loss = loss_pos + loss_z_pos + loss_label 
-
                     if n_val == 0:
                         if pos_supervised:
-                            print(f"pos target : ({x_star[0].item():.3f},{y_star[0].item():.3f}), pos_pred ({pos_preds[0,0].item():.3f},{pos_preds[0,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,0].item():.3f},{pos_preds_sup[0,1].item():.3f}) ")
-                            #print(f"pos probe : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}), pos_pred_sup ({pos_preds_sup[0,1,0].item():.3f},{pos_preds_sup[0,1,1].item():.3f}) ")
-                        else:
-                            print(f"pos target : ({x_probes[0,0].item():.3f},{y_probes[0,0].item():.3f}), pos_pred ({pos_preds[0,1,0].item():.3f},{pos_preds[0,1,1].item():.3f}) ")
-                        print(f"z_pos ref error = {np.sqrt(loss_z_pos_ref.item()):.3f}")
-                        print(f"z_pos error = {np.sqrt(loss_z_pos.item()):.3f}")
-                        if pos_supervised:
-                            print(f"z_pos sup error = {np.sqrt(loss_z_pos_sup.item()):.3f}")   
-                        print(f"pos error = {np.sqrt(loss_pos.item()):.3f}")
-                        if pos_supervised:
-                            print(f"pos sup error = {np.sqrt(loss_pos_sup.item()):.3f}")
+                            print(f"z star error = {np.sqrt(loss.item()):.3f}")   
+                            print(f"z star sup error = {np.sqrt(loss_sup.item()):.3f}")
                     
                     preds = output_t_head.argmax(dim=1)
                     #print(preds)
 
                     correct += (preds == labels).sum().item()
                     running_label += loss_label.item()
-                    running_z_pos_ref += loss_z_pos_ref.item()
-                    running_pos += loss_pos.item()
-                    running_z_pos += loss_z_pos.item()
-                    running_pos_sup += loss_pos_sup.item()
-                    running_z_pos_sup += loss_z_pos_sup.item()
+                    running_z_pos += loss.item()
+                    running_z_pos_sup += loss_sup.item()
 
                     preds_sup = output_t_head_sup.argmax(dim=1)
                     correct_sup += (preds_sup == labels).sum().item()
@@ -680,18 +549,13 @@ for epoch in range(train_epochs):
             history["classif"].append(100 * correct / total)
             history[f"sup classif"].append(100 * correct_sup / total)
             history["loss_label"].append(running_label / total)
-            history["loss_z_pos_ref"].append(running_z_pos_ref / total)
-            history["loss_pos"].append(running_pos / total)
             history["loss_z_pos"].append(running_z_pos / total)
-            history["loss_pos_sup"].append(running_pos_sup / total)
             history["loss_z_pos_sup"].append(running_z_pos_sup / total)
             df = pd.DataFrame(history)
             df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
 
             ist_transformer.train()
             linear_head.train()
-            pos_predictor.train()
-            z_pos_predictor.train()
 
     if epoch % 10 == 9:
         torch.save({
@@ -699,8 +563,6 @@ for epoch in range(train_epochs):
                 "history": history,
                 "ist_transformer": ist_transformer.state_dict(),
                 "linear_head": linear_head.state_dict(),
-                "pos_predictor": pos_predictor.state_dict(),
-                "z_pos_predictor": z_pos_predictor.state_dict(),
             },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
 
     if schedule:
