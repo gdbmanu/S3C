@@ -83,7 +83,11 @@ pure = False
 alpha = 1e-6
 beta = 1e-6 #1e-8 #3e-4 # !!!!! 1e-4 #3e-5 #!! 
 gamma = 1e-5
+<<<<<<< HEAD
 delta = 3e-7
+=======
+delta = 3e-6
+>>>>>>> 5ec5fca (update)
 
 inv_temp = 1
 stop_gradient = False
@@ -103,7 +107,11 @@ suffix = suffix + f"_a{alpha}"
 if beta != 1e-4 : suffix = suffix + f"_b{beta}"
 suffix = suffix + f"_c{gamma}"
 suffix = suffix + f"_d{delta}"
+<<<<<<< HEAD
 suffix = suffix + f'_mask{label_mask}'
+=======
+label_mask = 0.8
+>>>>>>> 5ec5fca (update)
 
 if pos_supervised:
     suffix = suffix + "_POS_SUP"
@@ -396,7 +404,11 @@ if finetune:
 else:
     if train_epochs == 100:
         linear_optimizer = torch.optim.AdamW(
+<<<<<<< HEAD
             [{'params': ist_transformer.parameters(), 'lr': delta}, #1e-5},
+=======
+            [{'params': ist_transformer.parameters(), 'lr': delta},
+>>>>>>> 5ec5fca (update)
             {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
@@ -404,7 +416,11 @@ else:
         )
     else:
         linear_optimizer = torch.optim.AdamW(
+<<<<<<< HEAD
             [{'params': ist_transformer.parameters(), 'lr': delta}, #3e-5}, #3e-6},
+=======
+            [{'params': ist_transformer.parameters(), 'lr': delta}, #3e-6},
+>>>>>>> 5ec5fca (update)
             {'params': z_pos_predictor.parameters(),       'lr': gamma}, #beta}, #1e-5},
             {'params': pos_predictor.parameters(),       'lr': beta}, #1e-5},
             {'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
