@@ -1706,7 +1706,7 @@ class WhatBlock(nn.Module):
     """
 
     def __init__(self, emb_dim=768, n_heads=12, 
-                 n_classes=1000,  dropout=0.1, residual=False, full_residual=False, 
+                 n_classes=1000,  dropout=0.1, residual=False, 
                  l_emb_detach=False, n_blocks=2):
         super().__init__()
 
@@ -1749,6 +1749,8 @@ class WhatBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
+        self.residual = residual
+
     def forward(self, views, l):
         # ── Vues se transforment entre elles ──────────────────────
 
@@ -1761,7 +1763,11 @@ class WhatBlock(nn.Module):
         v_cross = self.cross_v_norm(v)
         l = self.l_norm(l)
         h_l, attn_l = self.l_cross_attn(l, v_cross, v_cross)  # (B, 1, emb_dim) WHAT PATHWAY (w/o residual)    
-        l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
+        if self.residual:
+            l = l + h_l
+            l = l + self.l_ffn(self.l_norm_ffn(l))                 # (B, 1, emb_dim)
+        else:
+            l = self.l_ffn(self.l_norm_ffn(h_l))                 # (B, 1, emb_dim)
 
         return v, l, attn_l
 
@@ -2125,12 +2131,13 @@ class WhatWherePosTransformer(nn.Module):
 class WhatTransformer(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
+                 residual = False, pre_label=True,
                  n_classes=1000, frozen_emb = True,
                  label_smoothing=0.1, label_mask = 0.2):
         super().__init__()
         
         self.blocks = nn.ModuleList([
-            WhatBlock(emb_dim, n_heads, n_blocks=n_blocks) for _ in range(n_blocks)
+            WhatBlock(emb_dim, n_heads, n_blocks=n_blocks, residual=residual) for _ in range(n_blocks)
         ])
         
         self.pre_norm_l  = nn.LayerNorm(emb_dim)   
@@ -2158,6 +2165,7 @@ class WhatTransformer(nn.Module):
 
         self.norm_out = nn.LayerNorm(emb_dim)
         self.label_mask = label_mask
+        self.pre_label = pre_label
 
     def forward(self, views, labels):
         B = views.size(0)
@@ -2171,8 +2179,11 @@ class WhatTransformer(nn.Module):
         elif labels is not None:
             l_emb = self.label_embedding(labels)  # (B, emb_dim)
         else:
-            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)        
-        l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1) 
+            l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)   
+        if self.pre_label:     
+            l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1) 
+        else:
+            l_emb = self.pre_norm_l(l_emb).unsqueeze(1) 
 
         # MAIN LOOP
         for block in self.blocks:

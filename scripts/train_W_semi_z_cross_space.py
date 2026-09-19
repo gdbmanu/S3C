@@ -44,7 +44,7 @@ from datetime import datetime
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 128 #256 #
+batch_size = 256 #
 num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -56,7 +56,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 4 #2 #
+n_sab = 2 #
 
 n_heads = 12
 
@@ -79,7 +79,7 @@ mu = 1               # spatial probe weight
 
 pos_supervised = True # !!
 alpha = 1e-5
-delta = 3e-7
+delta = 3e-6
 
 inv_temp = 1
 stop_gradient = False
@@ -92,6 +92,9 @@ if use_synset_embeddings:
 else:
     label_smoothing = 0.8
 label_mask = 0.2
+
+residual = True
+pre_label = False
 
 suffix = ""
 suffix = suffix + f"_a{alpha}"
@@ -119,6 +122,10 @@ if index_embeddings:
     suffix = suffix + "_INDEX"
 if use_synset_embeddings:
     suffix = suffix + f"_SYNSET{synset_level}"
+if residual:
+    suffix = suffix + f"_RESID"
+if not pre_label:
+    suffix = suffix + "_NoFFIn"
 
 if orig: suffix = suffix + "_ORIG"
 
@@ -235,7 +242,7 @@ if use_synset_embeddings:
 
     
     ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                    n_classes=n_synsets, 
+                                                    n_classes=n_synsets, residual=residual,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 
@@ -258,7 +265,7 @@ else:
     else:
         emb = label_embeddings
     
-    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
+    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb, residual=residual,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 # LINEAR PROBE
@@ -375,10 +382,8 @@ if schedule:
 log_interval = 100
 
 history = {"epoch": [], "batch": [], "loss": [],
-        "loss_label": [],  
-        "loss_z_pos": [], "loss_z_pos_sup": []}
-history[f"classif"] = []
-history[f"sup classif"] = []
+        "loss_label": [], "loss_z_pos": [], "loss_z_pos_sup": [],
+        "classif": [], "static classif": [], "sup classif": [], "static sup classif": []}
 
 os.makedirs(save_dir, exist_ok=True)
 
@@ -463,14 +468,17 @@ for epoch in range(train_epochs):
             total_loss = 0
 
             total = 0
+            correct_star = 0.0
+            correct = 0.0
+            correct_static = 0.0
+            correct_sup = 0.0
+            correct_sup_static = 0.0
+
             correct = 0.0
             running_label = 0.0
             running_z_pos = 0.0
             running_z_pos_sup = 0.0
-            val_iter = iter(val_loader)
-
-            if True:
-                correct_sup = 0.0
+            val_iter = iter(val_loader)                
 
             with torch.no_grad():
                 for n_val in range(5):
@@ -519,35 +527,56 @@ for epoch in range(train_epochs):
                         if use_synset_embeddings:
                             labels = mem_labels
 
-                        ### LABEL LOSS           
-                        output_t_head = linear_head(output_t[:,0,:]) 
-                        output_t_head_sup = linear_head(output_t_sup[:,0,:]) 
-                        loss_label = criterion(output_t_head, labels)
-                        loss_label_sup = criterion(output_t_head_sup, labels)
+                        ### LABEL LOSS 
+                        logits_star = z_linear_head(z_star)          
+                        logits_head = linear_head(output_t[:,0,:]) 
+                        logits_head_static = z_linear_head(output_t[:,0,:])
+                        logits_head_sup = linear_head(output_t_sup[:,0,:]) 
+                        logits_head_sup_static = z_linear_head(output_t_sup[:,0,:]) 
+                        loss_label = criterion(logits_head, labels)
+                        loss_label_static = criterion(logits_head_static, labels)
+                        loss_label_sup = criterion(logits_head_sup, labels)
+                        loss_label_sup_static = criterion(logits_head_sup_static, labels)
+
 
                     if n_val == 0:
                         if pos_supervised:
-                            print(f"z star error = {np.sqrt(loss.item()):.3f}")   
-                            print(f"z star sup error = {np.sqrt(loss_sup.item()):.3f}")
+                            print(f"z tilde error = {np.sqrt(loss.item()):.3f}")   
+                            print(f"z tilde sup error = {np.sqrt(loss_sup.item()):.3f}")
+
                     
-                    preds = output_t_head.argmax(dim=1)
-                    #print(preds)
+                    
+                    preds_star = logits_star.argmax(dim=1)
+                    correct_star += (preds_star == labels).sum().item()
+                    
+                    preds = logits_head.argmax(dim=1)
                     correct += (preds == labels).sum().item()
+
+                    preds_static = logits_head_static.argmax(dim=1)
+                    correct_static += (preds_static == labels).sum().item()
 
                     running_label += loss_label.item()
                     running_z_pos += loss.item()
                     running_z_pos_sup += loss_sup.item()
 
-                    preds_sup = output_t_head_sup.argmax(dim=1)
+                    preds_sup = logits_head_sup.argmax(dim=1)
                     correct_sup += (preds_sup == labels).sum().item()
+
+                    preds_sup_static = logits_head_sup_static.argmax(dim=1)
+                    correct_sup_static += (preds_sup_static == labels).sum().item()
 
                     total += labels.size(0)
 
-            print(f"Global accuracy: {100 * correct / total:.2f}%")
+            print(f"Z star accuracy: {100 * correct_star / total:.2f}%")
+            print(f"Base accuracy: {100 * correct / total:.2f}%")
+            print(f"Base static accuracy: {100 * correct_static / total:.2f}%")
             print(f"Oracle accuracy: {100 * correct_sup / total:.2f}%")
+            print(f"Oracle static head  accuracy: {100 * correct_sup_static / total:.2f}%")
 
             history["classif"].append(100 * correct / total)
-            history[f"sup classif"].append(100 * correct_sup / total)
+            history["static classif"].append(100 * correct / total)
+            history["sup classif"].append(100 * correct_sup / total)
+            history["static sup classif"].append(100 * correct_sup / total)
             history["loss_label"].append(running_label / total)
             history["loss_z_pos"].append(running_z_pos / total)
             history["loss_z_pos_sup"].append(running_z_pos_sup / total)
