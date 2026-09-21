@@ -28,7 +28,7 @@ import clip
 from torchvision.models import ResNet50_Weights
 
 
-from s3c.models.heads import WhatTransformer, AttentionPooling #FovealSetTransformer
+from s3c.models.heads import WhatTransformer, AttentionPooling, ShiftPredictor #FovealSetTransformer
 from s3c.data.datasets import ImageNetZDataset
 from s3c.models.heads import  PosPredictor
 from s3c.utils.training import get_parent_synset
@@ -56,7 +56,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 2 #
+n_sab = 4 #
 
 n_heads = 12
 
@@ -84,7 +84,7 @@ delta = 3e-6
 inv_temp = 1
 stop_gradient = False
 
-use_synset_embeddings =  True #False # True
+use_synset_embeddings = True # False # 
 index_embeddings = True # False # True
 synset_level = 4
 if use_synset_embeddings:
@@ -325,6 +325,28 @@ if pos_supervised:
     z_linear_head.to(device)
     z_linear_head.train()
 
+    # shift predictor
+    mlp_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
+    mlp_shift = ShiftPredictor(emb_dim=embed_dim, hidden_dim=512)
+    epoch = 20
+    checkpoint_path = os.path.join(mlp_dir, f"checkpoint_epoch{epoch}.pt")  # exemple
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    state_dict = checkpoint["mlp"]
+
+    # --- Chargement dans le modèle ---
+    if True:
+        missing, unexpected = mlp_shift.load_state_dict(state_dict, strict=False)
+
+        print("➡️ Poids chargés (mlp).")
+        print("❗ Paramètres manquants :", missing)
+        print("⚠️ Paramètres inattendus :", unexpected)
+
+    mlp_shift.to(device)
+    mlp_shift.eval()
+
+
+
 
 ist_transformer.to(device)
 ist_transformer.train()
@@ -383,6 +405,8 @@ log_interval = 100
 
 history = {"epoch": [], "batch": [], "loss": [],
         "loss_label": [], "loss_z_pos": [], "loss_z_pos_sup": [],
+        "loss_shift": [], "loss_shift_sup": [], "loss_shift_ref": [], 
+        "cosine_sim": [], "cosine_sim_sup": [], 
         "classif": [], "static classif": [], "sup classif": [], "static sup classif": []}
 
 os.makedirs(save_dir, exist_ok=True)
@@ -416,16 +440,21 @@ for epoch in range(train_epochs):
             # coordonnées
             x_star = sxs[torch.arange(batch_size),  i_star]                          # (B,)
             y_star = sys_[torch.arange(batch_size), i_star]  
+            star_target = torch.stack([x_star, y_star], dim=1)    
             z_star = features[torch.arange(batch_size), i_star, :]                          # (B,)
 
         # Génère des indices aléatoires pour chaque échantillon du batch
         # Shape : (batch_size, k)
         perms = torch.stack([torch.randperm(n_saccades_max) for _ in range(batch_size)])
 
-        b_teacher = n_uplet_teacher
+        b_teacher = np.random.randint(1, n_uplet_teacher) # !!
         idx_t = perms[:, :b_teacher]
+        
 
         features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
+
+        
+
 
         if use_synset_embeddings:
             mem_labels = labels
@@ -442,6 +471,8 @@ for epoch in range(train_epochs):
             ### LABEL LOSS           
             output_t_head = linear_head(output_t[:,0,:].detach().clone()) 
             loss_label = criterion(output_t_head, labels)
+
+            
 
         if not finetune:
             optimizer.zero_grad()
@@ -478,6 +509,14 @@ for epoch in range(train_epochs):
             running_label = 0.0
             running_z_pos = 0.0
             running_z_pos_sup = 0.0
+
+            running_cosine_sim = 0.0
+            running_cosine_sim_sup = 0.0
+
+            running_loss_shift = 0.0
+            running_loss_shift_sup = 0.0
+            running_loss_shift_ref = 0.0
+
             val_iter = iter(val_loader)                
 
             with torch.no_grad():
@@ -510,8 +549,16 @@ for epoch in range(train_epochs):
 
                     b_teacher = n_uplet_teacher
                     idx_t = perms[:, :b_teacher] 
+                    b_probes = b_teacher + 1
+                    idx_probes = perms[:, b_teacher:b_probes] 
+                    assert b_probes <= n_saccades_max
 
                     features_t = features[torch.arange(batch_size).unsqueeze(1), idx_t, :].to(device)  # (batch_size, k, 768)
+
+                    x_probes = sxs[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
+                    y_probes = sys_[torch.arange(batch_size).unsqueeze(1), idx_probes].to(device)
+                    probe_targets = torch.stack([x_probes, y_probes], dim=2)                    # (B, n_probes, 2) 
+                    z_probes = features[torch.arange(batch_size).unsqueeze(1), idx_probes, :].to(device)
 
                     if use_synset_embeddings:
                         mem_labels = labels
@@ -523,6 +570,9 @@ for epoch in range(train_epochs):
 
                         loss = F.mse_loss(output_t[:,0,:], z_star)
                         loss_sup = F.mse_loss(output_t_sup[:,0,:], z_star)
+
+                        cosine_sim = F.cosine_similarity(output_t[:,0,:], z_star).mean()
+                        cosine_sim_sup = F.cosine_similarity(output_t_sup[:,0,:], z_star).mean()
                         
                         if use_synset_embeddings:
                             labels = mem_labels
@@ -533,18 +583,32 @@ for epoch in range(train_epochs):
                         logits_head_static = z_linear_head(output_t[:,0,:])
                         logits_head_sup = linear_head(output_t_sup[:,0,:]) 
                         logits_head_sup_static = z_linear_head(output_t_sup[:,0,:]) 
+
                         loss_label = criterion(logits_head, labels)
                         loss_label_static = criterion(logits_head_static, labels)
                         loss_label_sup = criterion(logits_head_sup, labels)
                         loss_label_sup_static = criterion(logits_head_sup_static, labels)
 
+                        ## POS LOSS
+                        shift_star = star_target - probe_targets[:,0,:] 
+                        shift_pred_star = mlp_shift(z_probes[:,0,:], z_star)
+                        shift_pred = mlp_shift(z_probes[:,0,:], output_t[:,0,:])
+                        shift_pred_sup = mlp_shift(z_probes[:,0,:], output_t_sup[:,0,:])
+
+                        loss_shift_ref = F.mse_loss(shift_pred_star, shift_star)
+                        loss_shift = F.mse_loss(shift_pred, shift_star)
+                        loss_shift_sup = F.mse_loss(shift_pred_sup, shift_star)
+
 
                     if n_val == 0:
                         if pos_supervised:
-                            print(f"z tilde error = {np.sqrt(loss.item()):.3f}")   
-                            print(f"z tilde sup error = {np.sqrt(loss_sup.item()):.3f}")
-
-                    
+                            print(f"z error = {np.sqrt(loss.item()):.3f}")   
+                            print(f"z sup error = {np.sqrt(loss_sup.item()):.3f}")
+                            print(f"z cosine = {cosine_sim.item():.3f}")   
+                            print(f"z sup cosine = {cosine_sim_sup.item():.3f}")
+                            #print(f"shift error = {np.sqrt(loss_shift.item()):.3f}")
+                            #print(f"shift sup error = {np.sqrt(loss_shift_sup.item()):.3f}")
+                            #print(f"shift ref error = {np.sqrt(loss_shift_ref.item()):.3f}")
                     
                     preds_star = logits_star.argmax(dim=1)
                     correct_star += (preds_star == labels).sum().item()
@@ -558,6 +622,13 @@ for epoch in range(train_epochs):
                     running_label += loss_label.item()
                     running_z_pos += loss.item()
                     running_z_pos_sup += loss_sup.item()
+
+                    running_cosine_sim += cosine_sim.item()
+                    running_cosine_sim_sup += cosine_sim_sup.item()
+
+                    running_loss_shift += loss_shift.item()
+                    running_loss_shift_sup += loss_shift_sup.item()
+                    running_loss_shift_ref += loss_shift_ref.item()
 
                     preds_sup = logits_head_sup.argmax(dim=1)
                     correct_sup += (preds_sup == labels).sum().item()
@@ -574,12 +645,22 @@ for epoch in range(train_epochs):
             print(f"Oracle static head  accuracy: {100 * correct_sup_static / total:.2f}%")
 
             history["classif"].append(100 * correct / total)
-            history["static classif"].append(100 * correct / total)
+            history["static classif"].append(100 * correct_static / total)
             history["sup classif"].append(100 * correct_sup / total)
-            history["static sup classif"].append(100 * correct_sup / total)
+            history["static sup classif"].append(100 * correct_sup_static / total)
+
             history["loss_label"].append(running_label / total)
-            history["loss_z_pos"].append(running_z_pos / total)
-            history["loss_z_pos_sup"].append(running_z_pos_sup / total)
+
+            history["loss_z_pos"].append(running_z_pos * batch_size / total)
+            history["loss_z_pos_sup"].append(running_z_pos_sup * batch_size / total)
+
+            history["cosine_sim"].append(running_cosine_sim * batch_size / total)
+            history["cosine_sim_sup"].append(running_cosine_sim_sup * batch_size / total)
+
+            history["loss_shift"].append(running_loss_shift * batch_size / total)
+            history["loss_shift_ref"].append(running_loss_shift_ref * batch_size / total)
+            history["loss_shift_sup"].append(running_loss_shift_sup * batch_size / total)
+
             df = pd.DataFrame(history)
             df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
 
