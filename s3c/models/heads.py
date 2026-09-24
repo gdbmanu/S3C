@@ -17,6 +17,26 @@ class ShiftPredictor(nn.Module):
         x = torch.cat([z1, z2], dim=-1)
         return self.net(x)
     
+class ShiftPredictor2(nn.Module):
+    def __init__(self, emb_dim=768, hidden_dim=512, dropout=0.5):
+        super().__init__()
+        self.norm = nn.LayerNorm(emb_dim)
+        self.net = nn.Sequential(
+            nn.Linear(2 * emb_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 2)  # sortie (dx, dy)
+        )
+
+    def forward(self, z1, z2):
+        z1 = self.norm(z1)
+        z2 = self.norm(z2)
+        x = torch.cat([z1, z2], dim=-1)
+        return self.net(x)
+    
 
 class PosPredictor(nn.Module):
     """
