@@ -56,7 +56,7 @@ epoch_teacher = 20
 zoom = 1.5
 std = 0.5 / zoom 
 
-n_sab = 4 #
+n_sab = 2 #
 
 n_heads = 12
 
@@ -84,7 +84,7 @@ delta = 3e-6
 inv_temp = 1
 stop_gradient = False
 
-use_synset_embeddings = True # False # 
+use_synset_embeddings = False # 
 index_embeddings = True # False # True
 synset_level = 4
 if use_synset_embeddings:
