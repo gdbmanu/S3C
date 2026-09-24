@@ -44,7 +44,7 @@ from datetime import datetime
 
 # --- Configuration générale ---
 # data_dir = val_dir = "/home/INT/dauce.e/data/Imagenet_full/val"   # Imagenet Validation set
-batch_size = 256 #
+batch_size = 256 #128 #
 num_workers = 12
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -64,14 +64,14 @@ n_saccades_max = 30
 n_uplet_teacher = 15
 n_probes = 3
 
-orig = False
+orig = True
 grid = False
 curriculum = False
 finetune = False
 
 if grid:
     n_saccades_max = 121
-    n_uplet_teacher = 18
+    n_uplet_teacher = 40
 
 train_epochs = 100
 lam = 0.05           # λ : trade-off JEPA / SIGReg
