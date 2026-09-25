@@ -94,7 +94,7 @@ else:
 label_mask = 0.2
 
 residual = True
-pre_label = False
+skip_ff_l = True
 
 suffix = ""
 suffix = suffix + f"_a{alpha}"
@@ -124,8 +124,8 @@ if use_synset_embeddings:
     suffix = suffix + f"_SYNSET{synset_level}"
 if residual:
     suffix = suffix + f"_RESID"
-if not pre_label:
-    suffix = suffix + "_NoFFIn"
+if skip_ff_l:
+    suffix = suffix + "_SKIP"
 
 if orig: suffix = suffix + "_ORIG"
 
@@ -242,7 +242,7 @@ if use_synset_embeddings:
 
     
     ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb,
-                                                    n_classes=n_synsets, residual=residual,
+                                                    n_classes=n_synsets, residual=residual, skip_ff_l=skip_ff_l,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 
@@ -265,7 +265,7 @@ else:
     else:
         emb = label_embeddings
     
-    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb, residual=residual,
+    ist_transformer = WhatTransformer(n_heads=n_heads, n_blocks=n_sab, pretrained_embeddings=emb, residual=residual, skip_ff_l=skip_ff_l,
                                                     label_smoothing=label_smoothing, label_mask=label_mask)
 
 # LINEAR PROBE
@@ -345,9 +345,6 @@ if pos_supervised:
     mlp_shift.to(device)
     mlp_shift.eval()
 
-
-
-
 ist_transformer.to(device)
 ist_transformer.train()
 
@@ -377,8 +374,6 @@ else:
         [{'params': linear_head.parameters(), 'lr': alpha}], #1e-4}],
         weight_decay=weight_decay, #0.04,  
     )
-    
-
 
 #scaler = torch.cuda.amp.GradScaler()
 if label_smoothing:
@@ -397,9 +392,6 @@ if schedule:
     cosine = CosineAnnealingLR(linear_optimizer, T_max=train_epochs - n_warm)
     scheduler = SequentialLR(linear_optimizer, schedulers=[warmup, cosine], milestones=[n_warm])
     
-
-
-# %%
 
 log_interval = 100
 

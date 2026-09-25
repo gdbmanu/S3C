@@ -2144,14 +2144,13 @@ class WhatWherePosTransformer(nn.Module):
             pos = torch.cat([z_emb, pos], dim=1)
         else:
             pos = z_emb
-        
 
         return torch.cat([l_emb, pos], dim=1) 
     
 class WhatTransformer(nn.Module):
     def __init__(self, emb_dim=768,
                  n_heads=12, n_blocks=2, dropout=0.1, pretrained_embeddings=None, 
-                 residual = False, pre_label=True,
+                 residual = False, skip_ff_l=False,
                  n_classes=1000, frozen_emb = True,
                  label_smoothing=0.1, label_mask = 0.2):
         super().__init__()
@@ -2185,7 +2184,7 @@ class WhatTransformer(nn.Module):
 
         self.norm_out = nn.LayerNorm(emb_dim)
         self.label_mask = label_mask
-        self.pre_label = pre_label
+        self.skip_ff_l = skip_ff_l
 
     def forward(self, views, labels):
         B = views.size(0)
@@ -2200,10 +2199,11 @@ class WhatTransformer(nn.Module):
             l_emb = self.label_embedding(labels)  # (B, emb_dim)
         else:
             l_emb  = self.cls_token.expand(B, -1, -1).squeeze(1)   
-        if self.pre_label:     
-            l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1) 
-        else:
+        if self.skip_ff_l:
             l_emb = self.pre_norm_l(l_emb).unsqueeze(1) 
+        else: 
+            l_emb = self.pre_norm_l(self.pre_l_ffn(l_emb)).unsqueeze(1) 
+            
 
         # MAIN LOOP
         for block in self.blocks:
