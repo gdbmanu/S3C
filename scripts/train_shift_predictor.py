@@ -59,7 +59,7 @@ n_sab = 4 #
 
 n_heads = 12
 
-orig = False
+orig = True
 grid = False
 
 train_epochs = 100
