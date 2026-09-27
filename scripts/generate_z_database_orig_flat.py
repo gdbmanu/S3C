@@ -62,9 +62,9 @@ else:
     train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
     val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
 
-load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
+#load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
 
-save_dir = "data/Imagenet_Z_orig"
+save_dir = "data/Imagenet_Z_orig_flat"
 
 epoch_teacher = 20
 
@@ -94,7 +94,7 @@ build_flat_pos_embed(model_orig,
 model = model_orig # FoveatedMultiViT(model_orig, norm=False)
 
 
-model.model.norm = nn.Identity() # pas de normalisation en sortie !
+model.norm = nn.Identity() # pas de normalisation en sortie !
 model.to(device)
 
 # 2. Geler le backbone
@@ -104,67 +104,145 @@ for param in model.parameters():
 train_dataset_raw   = datasets.ImageFolder(train_dir, transform=None)
 val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
 
-# ── fonction principale ───────────────────────────────────────────────────
+# # ── fonction principale ───────────────────────────────────────────────────
+# @torch.no_grad()
+# def generate_embeddings(model, split, dataset_raw, output_dir,
+#                         n_sac, zoom, std,
+#                         batch_size, num_workers, device):
+#     """
+#     Génère et sauvegarde les embeddings pour un split (train ou val).
+#     """
+#     print(f"\n── Génération embeddings — {split} ──────────────────────────")
+    
+#     dataset = FlatUpletDataset(
+#         base_folder=dataset_raw, # ImageFolder
+#         zoom=zoom,
+#         std=std,
+#         start_center=False, 
+#         n_uplet=n_sac,
+#         path=True
+#     )
+     
+#     loader  = DataLoader(
+#         dataset,
+#         batch_size  = batch_size,
+#         shuffle     = False,
+#         num_workers = num_workers,
+#         pin_memory=True,           # utile seulement si vous entrainez sur GPU
+#         persistent_workers=True,   # evite de relancer les workers a chaque epoque
+#         prefetch_factor=4,         # nb de batches prechargés d'avance par worker
+#         drop_last=True,
+#     )
+
+#     model.eval()
+#     out_root = Path(output_dir) / split
+#     skipped  = 0
+#     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() \
+#                 else torch.float16
+
+#     for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
+#         # imgs : (B, n_sac, 3, H, W)
+#         imgs = imgs.to(device)
+#         imgs = imgs.view(batch_size*n_uplet, 3, resolution, resolution)
+
+#         with torch.cuda.amp.autocast(dtype=amp_dtype):
+#             with torch.inference_mode():
+#                 z = model(imgs)    # (B* n_sac, D)
+#         z = z.view(batch_size, n_uplet, embed_dim)
+
+#         # sauvegarder chaque embedding dans un dossier séparé
+#         for i, rel_path in enumerate(rel_paths):
+#             out_path = out_root / rel_path
+#             out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
+
+#             # skip si déjà généré (reprise après interruption)
+#             if out_path.exists():
+#                 skipped += 1
+#                 continue
+
+#             out_path.parent.mkdir(parents=True, exist_ok=True)
+#             # Sauvegarder z[i], xs[i], et ys[i] dans un dictionnaire
+#             data_to_save = {
+#                 "zs": z[i].half().cpu(),
+#                 "xs": xs[i].cpu(),  # 
+#                 "ys": ys[i].cpu(),  # 
+#             }
+
+#             torch.save(data_to_save, out_path)
+
+#     print(f"  Terminé — {skipped} fichiers déjà existants ignorés.")
+
+from concurrent.futures import ThreadPoolExecutor
+
 @torch.no_grad()
 def generate_embeddings(model, split, dataset_raw, output_dir,
-                        n_sac, zoom, std,
-                        batch_size, num_workers, device):
-    """
-    Génère et sauvegarde les embeddings pour un split (train ou val).
-    """
+                         n_sac, zoom, std,
+                         batch_size, num_workers, device):
     print(f"\n── Génération embeddings — {split} ──────────────────────────")
-    
+
+    out_root = Path(output_dir) / split
+
+    # filtre les images deja traitees AVANT de construire le dataset :
+    # on ne paie ni le cout CPU (ShiftZoomUplet) ni le GPU pour elles.
+    root = Path(dataset_raw.root)
+    todo_samples, n_already = [], 0
+    for path, label in dataset_raw.samples:
+        rel_path = Path(path).relative_to(root)
+        out_path = (out_root / rel_path).with_suffix(".pt")
+        (todo_samples if not out_path.exists() else [None]).append((path, label)) \
+            if not out_path.exists() else None
+        if out_path.exists():
+            n_already += 1
+        else:
+            todo_samples.append((path, label))
+    dataset_raw.samples = todo_samples
+    dataset_raw.imgs = todo_samples
+
+    if not todo_samples:
+        print(f"  Rien a faire — {n_already} fichiers deja generes.")
+        return
+
     dataset = FlatUpletDataset(
-        base_folder=dataset_raw, # ImageFolder
-        zoom=zoom,
-        std=std,
-        start_center=False, 
-        n_uplet=n_sac,
-        path=True
+        base_folder=dataset_raw, zoom=zoom, std=std,
+        start_center=False, n_uplet=n_sac, path=True,
     )
-     
-    loader  = DataLoader(
-        dataset,
-        batch_size  = batch_size,
-        shuffle     = False,
-        num_workers = num_workers,
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=True, prefetch_factor=4, drop_last=True,
     )
 
     model.eval()
-    out_root = Path(output_dir) / split
-    skipped  = 0
-    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() \
-                else torch.float16
+    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
-    for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
-        # imgs : (B, n_sac, 3, H, W)
-        imgs = imgs.to(device)
+    seen_dirs = set()
+    futures = []
 
-        with torch.cuda.amp.autocast(dtype=amp_dtype):
-            with torch.inference_mode():
-                z = model(imgs)    # (B, n_sac, D)
+    def save_one(out_path, zs, xs_i, ys_i):
+        parent = out_path.parent
+        if parent not in seen_dirs:
+            parent.mkdir(parents=True, exist_ok=True)
+            seen_dirs.add(parent)
+        torch.save({"zs": zs, "xs": xs_i, "ys": ys_i}, out_path)
 
-        # sauvegarder chaque embedding dans un dossier séparé
-        for i, rel_path in enumerate(rel_paths):
-            out_path = out_root / rel_path
-            out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
+    with ThreadPoolExecutor(max_workers=4) as io_pool, torch.inference_mode():
+        for imgs, xs, ys, zooms, labels, rel_paths in tqdm(loader):
+            B, V, C, H, W = imgs.shape
+            imgs = imgs.to(device, non_blocking=True).view(B * V, C, H, W)
 
-            # skip si déjà généré (reprise après interruption)
-            if out_path.exists():
-                skipped += 1
-                continue
+            with torch.autocast(device_type=device.type, dtype=amp_dtype):
+                z = model(imgs)                # (B*V, D)
+            D = z.shape[-1]
+            z_cpu = z.view(B, V, D).half().cpu()   # un seul transfert GPU->CPU pour tout le batch
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            # Sauvegarder z[i], xs[i], et ys[i] dans un dictionnaire
-            data_to_save = {
-                "zs": z[i].half().cpu(),
-                "xs": xs[i].cpu(),  # 
-                "ys": ys[i].cpu(),  # 
-            }
+            for i, rel_path in enumerate(rel_paths):
+                out_path = (out_root / rel_path).with_suffix(".pt")
+                futures.append(io_pool.submit(save_one, out_path, z_cpu[i], xs[i], ys[i]))
 
-            torch.save(data_to_save, out_path)
+        for f in futures:
+            f.result()  # propage toute erreur d'ecriture (disque plein, permissions...)
 
-    print(f"  Terminé — {skipped} fichiers déjà existants ignorés.")
+    print(f"  Terminé — {n_already} fichiers déjà existants ignorés.")
 
 
 

@@ -75,6 +75,8 @@ class ShiftZoomUplet:
 
         return views
 
+
+
 class ShiftZoomGrid(ShiftZoomUplet):
     def __init__(self, zoom=1.5, n_grid=11):
         # n_uplet = n_grid² mais on n'utilise pas le tirage aléatoire

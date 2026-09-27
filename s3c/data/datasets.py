@@ -87,7 +87,7 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.base)
 
-class FlatdUpletDataset(torch.utils.data.Dataset):
+class FlatUpletDataset(torch.utils.data.Dataset):
    
     def __init__(self,
                  base_folder,           # ImageFolder 
@@ -103,7 +103,6 @@ class FlatdUpletDataset(torch.utils.data.Dataset):
         self.base    = base_folder
         self.shiftzoom_transform      = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet, start_center=start_center)
 
-        self.fovea_transform       = FF.resize(img, (output_size, output_size), interpolation=Image.BICUBIC)
 
         self.post_process = transforms.Compose([
             transforms.ToTensor(),
@@ -132,10 +131,9 @@ class FlatdUpletDataset(torch.utils.data.Dataset):
         
         for view, sx, sy, zoom in views:
             
-            view = transforms.Resize(512)(view)
-            view = transforms.CenterCrop(512)(view)
-            fov_view = self.fovea_transform(view)           # PIL 128×128
-            fov_view = self.post_process(fov_view)
+            view = transforms.Resize(128)(view)
+            view = transforms.CenterCrop(128)(view)
+            fov_view = self.post_process(view)
             fov_views.append(fov_view)
             sxs.append(sx)
             sys_.append(sy)
