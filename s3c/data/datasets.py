@@ -87,6 +87,81 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.base)
 
+class FlatdUpletDataset(torch.utils.data.Dataset):
+   
+    def __init__(self,
+                 base_folder,           # ImageFolder 
+                 zoom, 
+                 std,
+                 n_uplet,
+                 output_size   = 128,
+                 start_center=False, 
+                 limit=None,
+                 path=False
+                 ):
+        
+        self.base    = base_folder
+        self.shiftzoom_transform      = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet, start_center=start_center)
+
+        self.fovea_transform       = FF.resize(img, (output_size, output_size), interpolation=Image.BICUBIC)
+
+        self.post_process = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std =[0.229, 0.224, 0.225])
+        ])
+
+        if limit:
+            self.base_dataset.samples = self.base_dataset.samples[:limit]
+
+        self.path = path
+        if path:
+            self.path_root = Path(base_folder.root)
+
+
+    def __getitem__(self, idx):
+        img, label = self.base[idx]          # img = PIL brute
+        if self.path:
+            path_info, _ = self.base.samples[idx]
+            #print('Path info:', path_info)
+            rel_path    = Path(path_info).relative_to(self.path_root)
+
+        views = self.shiftzoom_transform(img)                 # liste de (view, sx, sy, zoom)
+
+        fov_views, sxs, sys_, zooms = [], [], [], []
+        
+        for view, sx, sy, zoom in views:
+            
+            view = transforms.Resize(512)(view)
+            view = transforms.CenterCrop(512)(view)
+            fov_view = self.fovea_transform(view)           # PIL 128×128
+            fov_view = self.post_process(fov_view)
+            fov_views.append(fov_view)
+            sxs.append(sx)
+            sys_.append(sy)
+            zooms.append(zoom)
+
+        if not self.path:
+            return (
+                torch.stack(fov_views),                          # (V, 3, 128, 128)
+                torch.tensor(sxs,   dtype=torch.float32),      # (V,)
+                torch.tensor(sys_,  dtype=torch.float32),      # (V,)
+                torch.tensor(zooms, dtype=torch.float32),      # (V,)
+                label,
+            )
+        else:
+            return (
+                torch.stack(fov_views),                          # (V, 3, 128, 128)
+                torch.tensor(sxs,   dtype=torch.float32),      # (V,)
+                torch.tensor(sys_,  dtype=torch.float32),      # (V,)
+                torch.tensor(zooms, dtype=torch.float32),      # (V,)
+                label,
+                str(rel_path)
+            )
+
+    def __len__(self):
+        return len(self.base)
+
 class FoveatedGridDataset(FoveatedUpletDataset):
     def __init__(self,
                  base_folder,

@@ -84,7 +84,7 @@ delta = 3e-6
 inv_temp = 1
 stop_gradient = False
 
-use_synset_embeddings =  False # True
+use_synset_embeddings = False
 index_embeddings = True # False # True
 synset_level = 4
 if use_synset_embeddings:

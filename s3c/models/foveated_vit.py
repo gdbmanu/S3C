@@ -162,3 +162,83 @@ def build_foveated_pos_embed(model,
     model.pos_embed = torch.nn.Parameter(new_pos_embed)
 
     return model.pos_embed
+
+def build_flat_pos_embed(
+    model_orig,
+    base_img_size: int = 224,
+    patch_size: int = 8,
+    dest_image_size: int = 128,
+):
+    """
+    Recalcule les position embeddings d'un ViT (timm) entraine sur des
+    images `base_img_size`x`base_img_size` (patch `patch_size`) pour les
+    adapter a une image `dest_image_size`x`dest_image_size`, avec la meme
+    taille de patch.
+ 
+    Modifie `model_orig` directement, par reference (comme
+    `model_orig.pos_embed = torch.nn.Parameter(new_pos_embed)`) : pas de
+    valeur de retour, `model_orig` est deja le bon modele en sortie.
+    Met aussi a jour les attributs internes de `patch_embed` (img_size /
+    grid_size / num_patches) pour que le forward reste coherent avec la
+    nouvelle taille d'image.
+ 
+    Args:
+        model_orig: modele timm (ex: timm.create_model("vit_base_patch8_224.dino", pretrained=True))
+        base_img_size: taille (carree) des images sur lesquelles le modele a ete entraine
+        patch_size: taille de patch du modele (doit rester la meme, seule la grille change)
+        dest_image_size: taille (carree) des nouvelles images
+    """
+    pos_embed = model_orig.pos_embed.detach()  # [1, num_prefix_tokens + orig_grid**2, D]
+    embed_dim = pos_embed.shape[-1]
+ 
+    # Nombre de tokens "hors patchs" (cls token, et eventuellement des
+    # "register tokens" dans les ViT recents). timm expose cet attribut
+    # sur le modele ; on tombe a 1 (cls token seul) si absent.
+    num_prefix_tokens = getattr(model_orig, "num_prefix_tokens", 1)
+ 
+    prefix_pos_embed = pos_embed[:, :num_prefix_tokens]      # [1, num_prefix_tokens, D]
+    patch_pos_embed = pos_embed[:, num_prefix_tokens:]       # [1, orig_grid**2, D]
+ 
+    orig_grid_size = base_img_size // patch_size
+    new_grid_size = dest_image_size // patch_size
+ 
+    n_orig_patches = patch_pos_embed.shape[1]
+    if orig_grid_size * orig_grid_size != n_orig_patches:
+        raise ValueError(
+            f"base_img_size={base_img_size} et patch_size={patch_size} donnent une "
+            f"grille de {orig_grid_size}x{orig_grid_size}={orig_grid_size**2} patchs, "
+            f"mais le pos_embed du modele en contient {n_orig_patches}. "
+            "Verifiez base_img_size/patch_size."
+        )
+ 
+    # [1, N, D] -> [1, D, H, W] pour interpoler comme une image
+    patch_pos_embed = patch_pos_embed.reshape(1, orig_grid_size, orig_grid_size, embed_dim)
+    patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)  # [1, D, H, W]
+ 
+    patch_pos_embed = F.interpolate(
+        patch_pos_embed,
+        size=(new_grid_size, new_grid_size),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
+ 
+    # retour a [1, new_grid**2, D]
+    patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).reshape(1, new_grid_size * new_grid_size, embed_dim)
+ 
+    new_pos_embed = torch.cat([prefix_pos_embed, patch_pos_embed], dim=1)
+ 
+    # Assignation par reference : model_orig est modifie directement, pas de return.
+    model_orig.pos_embed = nn.Parameter(new_pos_embed)
+ 
+    # Met a jour les metadonnees de patch_embed pour que timm n'aille pas
+    # verifier la taille d'image contre l'ancienne valeur (224).
+    patch_embed = model_orig.patch_embed
+    if hasattr(patch_embed, "img_size"):
+        patch_embed.img_size = (dest_image_size, dest_image_size)
+    if hasattr(patch_embed, "grid_size"):
+        patch_embed.grid_size = (new_grid_size, new_grid_size)
+    if hasattr(patch_embed, "num_patches"):
+        patch_embed.num_patches = new_grid_size * new_grid_size
+
+    return new_pos_embed
