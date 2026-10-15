@@ -6,17 +6,25 @@ model:
   mosaic_size: 128
   mosaic_sub_patch_grid: 8
   scales: [1.0, 0.5, 0.25, 0.125]
+  emb_dim: 768
+  head_hidden_dim: 512
 
 data:
-  train_dir: /path/to/imagenet/train
-  val_dir:   /path/to/imagenet/val
-  resize: 512
-  crop:   512
-  zoom:   1.5
-  std:    0.3
+  train_dir: ~/data/Imagenet_full/train
+  val_dir:   ~/data/Imagenet_full/val
   num_workers: 4
+  limit:     null      # ex: data.limit=500 pour un test rapide
 
 training:
-  batch_size: 32
   device: cuda
+  batch_size: 32
+  epochs: 30
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  fixed_level: null     # utilisé seulement si random_levels: false ; null = image entière
+  warmup_epochs: 5
+  log_interval: 100
+  val_batches: 5
   save_dir: ./checkpoints
+  run_name: null            # null -> date automatique
+  resume_checkpoint: null   # chemin du .pt pour reprendre

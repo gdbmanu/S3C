@@ -1,91 +1,100 @@
-"""
-Script d'entraînement teacher-student SMILES.
-
-Usage :
-    python scripts/train_teacher_student.py --config configs/teacher_student.yaml
-    python scripts/train_teacher_student.py --config configs/teacher_student.yaml \
-        training.epochs=50 training.lr=5e-5
-"""
 import argparse
-import yaml
-import torch
 from pathlib import Path
+from datetime import datetime
 
-# permettre l'override CLI de paramètres YAML
-def load_config(path, overrides):
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
-    for override in overrides:
-        keys, val = override.split("=")
-        keys = keys.split(".")
-        d = cfg
-        for k in keys[:-1]:
-            d = d[k]
-        # cast automatique
-        try:    val = int(val)
-        except: 
-            try: val = float(val)
-            except: pass
-        d[keys[-1]] = val
-    return cfg
 
+import yaml
+
+from s3c.utils.config import load_config  
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("overrides", nargs="*")  # training.epochs=50
+    parser.add_argument("overrides", nargs="*", help="ex: training.epochs=50")
     args = parser.parse_args()
 
     cfg = load_config(args.config, args.overrides)
+    print(yaml.dump(cfg, sort_keys=False))
 
-    # imports locaux après config
+    # imports locaux après lecture de la config
     import timm
-    from s3c.models.foveated_vit import FoveatedMultiViT, build_foveated_pos_embed
-    from s3c.models.student_teacher import StudentWithYPredictor, update_ema_student_teacher
+    from s3c.models.foveated_vit import build_foveated_pos_embed, build_flat_pos_embed  
     from s3c.models.heads import ShiftPredictor
-    from s3c.data.datasets import FoveatedPairDataset
-    from s3c.data.transforms import ShiftZoomUplet, FoveatedPyramidTransform
     from s3c.utils.training import train_teacher_student_Xattn
 
-    device = cfg["training"]["device"]
+    m, d, t = cfg["model"], cfg["data"], cfg["training"]
+    transform = m["transform"]
+    if transform not in ("fovea", "flat"):
+        raise ValueError(f"model.transform doit valoir 'fovea' ou 'flat', reçu : {transform!r}")
+    run_name = str(t["run_name"]) if t["run_name"] else datetime.now().strftime("%H-%M-%S")
+    device = t["device"]
+
+    # ── sauvegarde de la config effectivement utilisée ───────────────────
+    save_dir = Path(t["save_dir"])
+    save_dir.mkdir(parents=True, exist_ok=True)
+    with open(save_dir / f"{run_name}_config.yaml", "w") as f:
+        yaml.dump(cfg, f, sort_keys=False)
 
     # ── modèle ───────────────────────────────────────────────────────────
-    base_model = timm.create_model(
-        cfg["model"]["name"], pretrained=cfg["model"]["pretrained"]
-    )
+    base_model = timm.create_model(m["name"], pretrained=m["pretrained"])
     base_model.patch_embed.strict_img_size = False
-    build_foveated_pos_embed(
-        base_model,
-        base_img_size         = cfg["model"]["img_size"],
-        patch_size            = cfg["model"]["patch_size"],
-        mosaic_sub_patch_grid = cfg["model"]["mosaic_sub_patch_grid"],
-        scales                = cfg["model"]["scales"],
-    )
+    if transform == "fovea":
+        build_foveated_pos_embed(
+            base_model,
+            base_img_size         = m["img_size"],
+            patch_size            = m["patch_size"],
+            mosaic_sub_patch_grid = m["mosaic_sub_patch_grid"],
+            scales                = m["scales"],
+        )
+    else:  # "flat"
+        build_flat_pos_embed(
+            base_model,
+            base_img_size=224,
+            patch_size=8,
+            dest_image_size = m["mosaic_size"],
+        )
 
-    fovea_transform = FoveatedPyramidTransform(
-        output_size=cfg["model"]["mosaic_size"]
+    mlp = ShiftPredictor(
+        emb_dim    = m["emb_dim"],
+        hidden_dim = m["head_hidden_dim"],
+    ).to(device)
+
+    data_kwargs = dict(
+        transform     = m["transform"],
+        resolution    = m["mosaic_size"],
+        num_workers   = d["num_workers"],
+        limit         = d["limit"],
+        n_levels      = len(m["scales"]),
+        random_levels = t["random_levels"],
+        fixed_level   = t["fixed_level"],
     )
-    mlp = ShiftPredictor(emb_dim=768, hidden_dim=512).to(device)
 
     # ── entraînement ─────────────────────────────────────────────────────
     trained = train_teacher_student_Xattn(
-        dino_model   = base_model,
-        mlp          = mlp,
-        zoom         = cfg["data"]["zoom"],
-        std_min      = cfg["training"]["std_min"],
-        std_max      = cfg["training"]["std_max"],
-        resolution   = cfg["model"]["mosaic_size"],
-        start_center = True,
-        layernorm    = False,
-        train_dir    = cfg["data"]["train_dir"],
-        val_dir      = cfg["data"]["val_dir"],
-        batch_size   = cfg["training"]["batch_size"],
-        device       = device,
-        epochs       = cfg["training"]["epochs"],
-        lr           = cfg["training"]["lr"],
-        log_interval = cfg["training"]["log_interval"],
-        ema_momentum = cfg["training"]["ema_momentum"],
-        save_dir     = cfg["training"]["save_dir"],
+        dino_model        = base_model,
+        mlp               = mlp,        
+        zoom              = t["zoom"],
+        std_min           = float(t["std_min"]) / t["zoom"],
+        std_max           = float(t["std_max"]) / t["zoom"],
+        data_kwargs       = data_kwargs,
+        start_center      = t["start_center"],
+        layernorm         = m["layernorm"],
+        train_dir         = d["train_dir"],
+        val_dir           = d["val_dir"],
+        batch_size        = t["batch_size"],
+        device            = device,
+        epochs            = t["epochs"],
+        lr                = float(t["lr"]),
+        weight_decay      = float(t["weight_decay"]),
+        warmup_epochs     = t["warmup_epochs"],
+        backbone_lr_scale = float(t["backbone_lr_scale"]),
+        head_lr_scale     = float(t["head_lr_scale"]),
+        log_interval      = t["log_interval"],
+        val_batches       = t["val_batches"],
+        ema_momentum      = float(t["ema_momentum"]),
+        save_dir          = str(save_dir),
+        run_name          = run_name,
+        resume_checkpoint = t["resume_checkpoint"],
     )
 
 

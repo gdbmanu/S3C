@@ -18,6 +18,8 @@ import nltk
 nltk.download('wordnet')
 from nltk.corpus import wordnet as wn
 
+from datetime import datetime
+
 
 def get_parent_synset(wnid, level=2):
     """
@@ -93,31 +95,36 @@ def unfreeze_backbone(student):
     for p in student.parameters():
         p.requires_grad = True
 
+def _atomic_save(obj, path):
+    torch.save(obj, path + ".tmp")
+    os.replace(path + ".tmp", path)
+
+def _optim_path(ckpt_path):
+    root, ext = os.path.splitext(ckpt_path)
+    return root + "_optim" + ext   # X_checkpoint.pt -> X_checkpoint_optim.pt
+
 def train_teacher_student_Xattn(
-    dino_model,
-    mlp,
-    zoom,
-    std_min,
-    std_max,
-    resolution=128,
-    start_center = True,
-    layernorm    = False,
-    train_dir="",
-    val_dir="",
-    batch_size=32,
-    device='cuda',
-    epochs=10,
-    lr=1e-4,
-    log_interval=100,
-    ema_momentum=0.999,
-    alpha=0.3,
-    lambda_sparse=1e-2,
-    save_dir="../checkpoints/checkpoints_teacher_student",
-    resume_epoch=0,       # resume from crash
-    resume_batch=0,       # 
-    resume_checkpoint=None  # 
-):
+        dino_model, mlp, zoom, std_min, std_max,
+        data_kwargs=None,
+        start_center=True, layernorm=False,
+        train_dir="", val_dir="",
+        batch_size=32, device="cuda", epochs=10,
+        lr=1e-4, weight_decay=1e-4, warmup_epochs=5,
+        backbone_lr_scale=0.01, head_lr_scale=0.1,
+        log_interval=100, val_batches=5, ema_momentum=0.999,
+        save_dir="../checkpoints/checkpoints_teacher_student",
+        run_name=None,            # None -> horodatage automatique
+        resume_checkpoint=None,   # epoch et batch sont lus dans le checkpoint
+    ):
+    
     os.makedirs(save_dir, exist_ok=True)
+    run_name = run_name or datetime.now().strftime("%Y-%m-%d")
+    ckpt_path  = os.path.join(save_dir, f"{run_name}_checkpoint.pt")
+    optim_path = _optim_path(ckpt_path)
+    log_path   = os.path.join(save_dir, f"{run_name}_training_log.csv")
+
+    data_kwargs = data_kwargs or {}
+    val_data_kwargs = {**data_kwargs, "random_levels": False}
 
     dino_student_y = StudentWithYPredictor(deepcopy(dino_model)).to(device)
     dino_teacher = deepcopy(dino_model).to(device)
@@ -130,53 +137,63 @@ def train_teacher_student_Xattn(
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": backbone_params, "lr": lr * 0.01},
-            {"params": head_params, "lr": lr * 0.1},
+            {"params": backbone_params,  "lr": lr * backbone_lr_scale},
+            {"params": head_params,      "lr": lr * head_lr_scale},
             {"params": mlp.parameters(), "lr": lr},
         ],
-        weight_decay=1e-4
+        weight_decay=weight_decay,
     )
-
-    scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
 
     # --- Chargement du checkpoint ---
+    resume_epoch, resume_batch = 0, 0
     if resume_checkpoint is not None:
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
-        dino_student_y.load_state_dict(checkpoint["student"])
-        dino_teacher.load_state_dict(checkpoint["teacher"])
-        mlp.load_state_dict(checkpoint["mlp"])
-        history = checkpoint["history"]
-        del checkpoint
+        ckpt = torch.load(resume_checkpoint, map_location=device)
+        dino_student_y.load_state_dict(ckpt["student"])
+        dino_teacher.load_state_dict(ckpt["teacher"])
+        mlp.load_state_dict(ckpt["mlp"])
+        history = ckpt["history"]
+        resume_epoch, resume_batch = ckpt["epoch"], ckpt["batch"]
+        del ckpt
+
+        optim_file = _optim_path(resume_checkpoint)
+        opt = torch.load(optim_file, map_location=device) if os.path.exists(optim_file) else None
+        if opt is not None and (opt["epoch"], opt["batch"]) == (resume_epoch, resume_batch):
+            optimizer.load_state_dict(opt["optimizer"])
+            scheduler.load_state_dict(opt["scheduler"])
+        else:
+            print("État de l'optimiseur absent ou incohérent : optimiseur réinitialisé")
+            for _ in range(resume_epoch):
+                scheduler.step()
+        del opt
         torch.cuda.empty_cache()
-        print(f"✅ Checkpoint chargé : {resume_checkpoint}")
-        print(f"   Reprise à epoch {resume_epoch + 1}, batch {resume_batch}")
+        print(f"Reprise à l'epoch {resume_epoch + 1}, batch {resume_batch}")
     else:
         history = {"epoch": [], "batch": [],
                    "train_loss_1": [], "val_loss_1": [],
                    "train_loss_2": [], "val_loss_2": [],
                    "train_loss_3": [], "val_loss_3": []}
-
-    # Remettre le scheduler dans le bon état
-    for _ in range(resume_epoch):
-        scheduler.step()
+    print(f"LR courante : {scheduler.get_last_lr()}")
+    
     print(f"LR courante : {scheduler.get_last_lr()}")
 
     criterion = nn.MSELoss()
     dino_teacher.eval()
 
     for epoch in range(resume_epoch, epochs):
-        torch.cuda.reset_peak_memory_stats()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         dino_student_y.train()
         mlp.train()
         running_loss_1 = 0.0
         running_loss_2 = 0.0
         running_loss_3 = 0.0
 
-        mult = (1 - 0.95 ** epoch) / (1 - 0.95 ** (epochs - 1))
+        mult = (1 - 0.95**epoch) / (1 - 0.95**max(epochs - 1, 1))
         std = std_min + mult * (std_max - std_min)
 
-        train_loader = make_pair_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size)
-        val_loader = make_pair_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size)
+        train_loader = make_pair_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size, **data_kwargs)
+        val_loader = make_pair_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size, **val_data_kwargs)
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, (img1, img2, y_target) in enumerate(pbar):
@@ -186,7 +203,8 @@ def train_teacher_student_Xattn(
                 if batch_idx % 1000 == 0:
                     print(f"  Skip batch {batch_idx}/{resume_batch}...")
                 del img1, img2, y_target
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
 
             img1, img2, y_target = img1.to(device), img2.to(device), y_target.to(device)
@@ -233,7 +251,7 @@ def train_teacher_student_Xattn(
                 val_loss_1 = val_loss_2 = val_loss_3 = 0.0
                 val_iter = iter(val_loader)
                 with torch.inference_mode():
-                    for _ in range(5):
+                    for _ in range(val_batches):
                         img1, img2, y_target = next(val_iter)
                         img1, img2, y_target = img1.to(device), img2.to(device), y_target.to(device)
                         z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
@@ -244,9 +262,9 @@ def train_teacher_student_Xattn(
                         val_loss_2 += criterion(y_pred, y_target).item()
                         val_loss_3 += criterion(z1, z1_target).item()
 
-                val_loss_1 /= 5
-                val_loss_2 /= 5
-                val_loss_3 /= 5
+                val_loss_1 /= val_batches
+                val_loss_2 /= val_batches
+                val_loss_3 /= val_batches
                 print(f"Validation losses: {val_loss_1:.4f} / {val_loss_2:.4f} / {val_loss_3:.4f}")
 
                 history["epoch"].append(epoch + 1)
@@ -258,17 +276,21 @@ def train_teacher_student_Xattn(
                 history["val_loss_2"].append(val_loss_2)
                 history["val_loss_3"].append(val_loss_3)
 
-                torch.save({
-                    "epoch": epoch,
-                    "batch": batch_idx + 1,   # <-- sauvegardé aussi
+                _atomic_save({
+                    "epoch": epoch, "batch": batch_idx + 1,
                     "student": dino_student_y.state_dict(),
                     "teacher": dino_teacher.state_dict(),
                     "mlp": mlp.state_dict(),
                     "history": history,
-                }, os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
+                }, ckpt_path)
 
-                df = pd.DataFrame(history)
-                df.to_csv(os.path.join(save_dir, "training_log.csv"), index=False)
+                _atomic_save({
+                    "epoch": epoch, "batch": batch_idx + 1,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                }, optim_path)
+
+                pd.DataFrame(history).to_csv(log_path, index=False)
 
                 del img1, img2, y_pred, y_target
                 del z1, z1_target, z2, z2_pred
@@ -277,10 +299,14 @@ def train_teacher_student_Xattn(
                 dino_student_y.train()
                 mlp.train()
 
-        torch.cuda.empty_cache()
-        print("Peak MB:", torch.cuda.max_memory_allocated() / 1024**2)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("Peak MB:", torch.cuda.max_memory_allocated() / 1024**2)
         scheduler.step()
 
+    if os.path.exists(optim_path):
+        os.remove(optim_path)
+        print(f"Fichier optimiseur supprimé : {optim_path}")
     print(f"✅ Entraînement terminé.")
     return dino_student_y, dino_teacher, mlp, history
 

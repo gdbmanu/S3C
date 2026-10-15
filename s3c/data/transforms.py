@@ -3,6 +3,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from torchvision import transforms
+
 from torchvision.transforms import functional as FF
 
 from PIL import Image
@@ -150,3 +152,34 @@ class FoveatedPyramidTransform:
             mosaic = FF.to_tensor(mosaic)
 
         return mosaic
+
+class FlatTransform:
+    """
+    Équivalent 'flat' de FoveatedPyramidTransform.
+    level (0..n_levels-1) : plus il est haut, plus la zone centrale conservée est grande.
+    Hors de ce carré central, les pixels sont à zéro (noir, avant normalisation).
+    level=None -> image entière (comme level=3 dans la version fovéale).
+    """
+    def __init__(self, output_size=128, keep_fractions=(0.5, 0.707, 0.866, 1.0)): #(0.25, 0.5, 0.75, 1.0)):
+        self.output_size = output_size
+        self.keep_fractions = keep_fractions       # indexé par level
+        self.n_levels = len(keep_fractions)
+        self.base = transforms.Compose([
+            transforms.Resize(output_size),
+            transforms.CenterCrop(output_size),
+        ])
+
+    def __call__(self, img, level=None):
+        img = self.base(img)                       # PIL, output_size x output_size
+        if level is None:
+            level = self.n_levels - 1
+        frac = self.keep_fractions[level]
+        if frac >= 1.0:
+            return img
+
+        size = self.output_size
+        side = max(1, round(size * frac))
+        left = (size - side) // 2                  # même centrage que le crop fovéal
+        out = Image.new(img.mode, img.size)        # noir par défaut
+        out.paste(img.crop((left, left, left + side, left + side)), (left, left))
+        return out

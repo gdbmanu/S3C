@@ -233,13 +233,13 @@ def evaluate_saccade(teacher, norm_ref, shift_predictor, ist_transformer, z_line
         mos_s = make_mosaics(imgs, x_star.tolist(), y_star.tolist(), zoom, fovea_transform).to(device)
         z_sacc = teacher(mos_s)
         logits_sacc = z_linear_head(norm_ref(z_sacc))
-        #logits_sacc = z_linear_head(norm_ref(z_star))
+        logits_star = z_linear_head(norm_ref(z_star))
         #logits_sacc = z_linear_head(z_sacc)
 
         # 5. précisions
         correct["center"] += (logits_center.argmax(1) == labels).sum().item()
         correct["saccade"] += (logits_sacc.argmax(1) == labels).sum().item()
-        correct["total"] += ((logits_center + logits_sacc).argmax(1) == labels).sum().item()
+        correct["total"] += ((logits_center + logits_sacc + logits_star).argmax(1) == labels).sum().item()
         n += B
 
         s = summary()
