@@ -168,6 +168,9 @@ class FoveatedPairDataset(Dataset):
                 idx = random.randint(0, len(self) - 1)
 
         raise RuntimeError(f"Impossible de charger un exemple après {max_retries} tentatives.")
+    
+    def __len__(self):
+        return len(self.base_dataset)
 
     
 class ImageNetZDataset(Dataset):

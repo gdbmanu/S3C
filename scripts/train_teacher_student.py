@@ -26,7 +26,7 @@ def main():
     transform = m["transform"]
     if transform not in ("fovea", "flat"):
         raise ValueError(f"model.transform doit valoir 'fovea' ou 'flat', reçu : {transform!r}")
-    run_name = str(t["run_name"]) if t["run_name"] else datetime.now().strftime("%H-%M-%S")
+    run_name = str(t["run_name"]) if t["run_name"] else datetime.now().strftime("%Y%m%d")
     device = t["device"]
 
     # ── sauvegarde de la config effectivement utilisée ───────────────────

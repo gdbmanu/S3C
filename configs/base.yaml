@@ -18,11 +18,13 @@ data:
 training:
   device: cuda
   batch_size: 32
-  epochs: 30
+  epochs: 20
   lr: 1.0e-4
   weight_decay: 1.0e-4
   fixed_level: null     # utilisé seulement si random_levels: false ; null = image entière
   warmup_epochs: 5
+  backbone_lr_scale: 0.01
+  head_lr_scale: 0.1
   log_interval: 100
   val_batches: 5
   save_dir: ./checkpoints
