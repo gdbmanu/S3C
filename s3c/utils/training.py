@@ -118,13 +118,17 @@ def train_teacher_student_Xattn(
     ):
     
     os.makedirs(save_dir, exist_ok=True)
-    run_name = run_name or datetime.now().strftime("%Y-%m-%d")
+    run_name = run_name or datetime.now().strftime("%Y%m%d")
     ckpt_path  = os.path.join(save_dir, f"{run_name}_checkpoint.pt")
     optim_path = _optim_path(ckpt_path)
     log_path   = os.path.join(save_dir, f"{run_name}_training_log.csv")
 
     data_kwargs = data_kwargs or {}
     val_data_kwargs = {**data_kwargs, "random_levels": False}
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     dino_student_y = StudentWithYPredictor(deepcopy(dino_model)).to(device)
     dino_teacher = deepcopy(dino_model).to(device)
@@ -145,6 +149,12 @@ def train_teacher_student_Xattn(
     )
     scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
 
+    #scaler = torch.amp.GradScaler("cuda")
+    try:
+        scaler = torch.amp.GradScaler("cuda")      # PyTorch >= 2.3
+    except AttributeError:
+        scaler = torch.cuda.amp.GradScaler()       # PyTorch plus ancien
+
     # --- Chargement du checkpoint ---
     resume_epoch, resume_batch = 0, 0
     if resume_checkpoint is not None:
@@ -161,6 +171,7 @@ def train_teacher_student_Xattn(
         if opt is not None and (opt["epoch"], opt["batch"]) == (resume_epoch, resume_batch):
             optimizer.load_state_dict(opt["optimizer"])
             scheduler.load_state_dict(opt["scheduler"])
+            scaler.load_state_dict(opt["scaler"])
         else:
             print("État de l'optimiseur absent ou incohérent : optimiseur réinitialisé")
             for _ in range(resume_epoch):
@@ -209,27 +220,45 @@ def train_teacher_student_Xattn(
 
             img1, img2, y_target = img1.to(device), img2.to(device), y_target.to(device)
 
-            with torch.inference_mode():
+            
+
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
                 z1_target = dino_teacher.forward_features(img1)[:, 0, :]
                 z2 = dino_teacher.forward_features(img2)[:, 0, :]
+            z1_target, z2 = z1_target.float(), z2.float()   # hors inference_mode, comme avant
 
-            z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
+            #z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
+            with torch.autocast("cuda", dtype=torch.float16):
+                z1, z2_pred = dino_student_y(img1, y_target, layernorm=layernorm)
+                y_pred = mlp(z1, z2.detach().clone())
 
-            loss_align = criterion(z2_pred, z2.detach().clone())
+            '''loss_align = criterion(z2_pred, z2.detach().clone())
             running_loss_1 += loss_align.item()
 
-            y_pred = mlp(z1, z2.detach().clone())
+            #y_pred = mlp(z1, z2.detach().clone())
             loss_shift = criterion(y_pred, y_target)
             running_loss_2 += loss_shift.item()
 
             loss_reg = criterion(z1, z1_target.detach().clone())
+            running_loss_3 += loss_reg.item()'''
+
+            loss_align = criterion(z2_pred.float(), z2.detach().clone())
+            running_loss_1 += loss_align.item()
+
+            loss_shift = criterion(y_pred.float(), y_target)
+            running_loss_2 += loss_shift.item()
+
+            loss_reg   = criterion(z1.float(), z1_target.detach().clone())
             running_loss_3 += loss_reg.item()
 
             loss = loss_align + loss_shift + loss_reg
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            #loss.backward()
+            #optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             update_ema_student_teacher(dino_student_y, dino_teacher, momentum=ema_momentum)
 
@@ -288,6 +317,7 @@ def train_teacher_student_Xattn(
                     "epoch": epoch, "batch": batch_idx + 1,
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict(),
                 }, optim_path)
 
                 pd.DataFrame(history).to_csv(log_path, index=False)
