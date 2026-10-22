@@ -45,15 +45,12 @@ n_uplet = 30
 
 
 # Monter le dossier distant
-local=False
+local=True
 if local == False:
     mount_point = os.path.expanduser("~/imagenet_mount")
 
-    try:
-        os.makedirs(mount_point, exist_ok=True)
+    if not os.path.ismount(mount_point):
         subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
-    except:
-        pass
 
     # Ton code ici, en utilisant mount_point
     train_dir = os.path.join(mount_point, "train")
@@ -104,145 +101,145 @@ for param in model.parameters():
 train_dataset_raw   = datasets.ImageFolder(train_dir, transform=None)
 val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
 
-# # ── fonction principale ───────────────────────────────────────────────────
-# @torch.no_grad()
-# def generate_embeddings(model, split, dataset_raw, output_dir,
-#                         n_sac, zoom, std,
-#                         batch_size, num_workers, device):
-#     """
-#     Génère et sauvegarde les embeddings pour un split (train ou val).
-#     """
-#     print(f"\n── Génération embeddings — {split} ──────────────────────────")
-    
-#     dataset = FlatUpletDataset(
-#         base_folder=dataset_raw, # ImageFolder
-#         zoom=zoom,
-#         std=std,
-#         start_center=False, 
-#         n_uplet=n_sac,
-#         path=True
-#     )
-     
-#     loader  = DataLoader(
-#         dataset,
-#         batch_size  = batch_size,
-#         shuffle     = False,
-#         num_workers = num_workers,
-#         pin_memory=True,           # utile seulement si vous entrainez sur GPU
-#         persistent_workers=True,   # evite de relancer les workers a chaque epoque
-#         prefetch_factor=4,         # nb de batches prechargés d'avance par worker
-#         drop_last=True,
-#     )
-
-#     model.eval()
-#     out_root = Path(output_dir) / split
-#     skipped  = 0
-#     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() \
-#                 else torch.float16
-
-#     for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
-#         # imgs : (B, n_sac, 3, H, W)
-#         imgs = imgs.to(device)
-#         imgs = imgs.view(batch_size*n_uplet, 3, resolution, resolution)
-
-#         with torch.cuda.amp.autocast(dtype=amp_dtype):
-#             with torch.inference_mode():
-#                 z = model(imgs)    # (B* n_sac, D)
-#         z = z.view(batch_size, n_uplet, embed_dim)
-
-#         # sauvegarder chaque embedding dans un dossier séparé
-#         for i, rel_path in enumerate(rel_paths):
-#             out_path = out_root / rel_path
-#             out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
-
-#             # skip si déjà généré (reprise après interruption)
-#             if out_path.exists():
-#                 skipped += 1
-#                 continue
-
-#             out_path.parent.mkdir(parents=True, exist_ok=True)
-#             # Sauvegarder z[i], xs[i], et ys[i] dans un dictionnaire
-#             data_to_save = {
-#                 "zs": z[i].half().cpu(),
-#                 "xs": xs[i].cpu(),  # 
-#                 "ys": ys[i].cpu(),  # 
-#             }
-
-#             torch.save(data_to_save, out_path)
-
-#     print(f"  Terminé — {skipped} fichiers déjà existants ignorés.")
-
-from concurrent.futures import ThreadPoolExecutor
-
+# ── fonction principale ───────────────────────────────────────────────────
 @torch.no_grad()
 def generate_embeddings(model, split, dataset_raw, output_dir,
-                         n_sac, zoom, std,
-                         batch_size, num_workers, device):
+                        n_sac, zoom, std,
+                        batch_size, num_workers, device):
+    """
+    Génère et sauvegarde les embeddings pour un split (train ou val).
+    """
     print(f"\n── Génération embeddings — {split} ──────────────────────────")
-
-    out_root = Path(output_dir) / split
-
-    # filtre les images deja traitees AVANT de construire le dataset :
-    # on ne paie ni le cout CPU (ShiftZoomUplet) ni le GPU pour elles.
-    root = Path(dataset_raw.root)
-    todo_samples, n_already = [], 0
-    for path, label in dataset_raw.samples:
-        rel_path = Path(path).relative_to(root)
-        out_path = (out_root / rel_path).with_suffix(".pt")
-        (todo_samples if not out_path.exists() else [None]).append((path, label)) \
-            if not out_path.exists() else None
-        if out_path.exists():
-            n_already += 1
-        else:
-            todo_samples.append((path, label))
-    dataset_raw.samples = todo_samples
-    dataset_raw.imgs = todo_samples
-
-    if not todo_samples:
-        print(f"  Rien a faire — {n_already} fichiers deja generes.")
-        return
-
+    
     dataset = FlatUpletDataset(
-        base_folder=dataset_raw, zoom=zoom, std=std,
-        start_center=False, n_uplet=n_sac, path=True,
+        base_folder=dataset_raw, # ImageFolder
+        zoom=zoom,
+        std=std,
+        start_center=False, 
+        n_uplet=n_sac,
+        path=True
     )
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True,
-        persistent_workers=True, prefetch_factor=4, drop_last=True,
+     
+    loader  = DataLoader(
+        dataset,
+        batch_size  = batch_size,
+        shuffle     = False,
+        num_workers = num_workers,
+        pin_memory=True,           # utile seulement si vous entrainez sur GPU
+        persistent_workers=True,   # evite de relancer les workers a chaque epoque
+        prefetch_factor=4,         # nb de batches prechargés d'avance par worker
+        drop_last=True,
     )
 
     model.eval()
-    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    out_root = Path(output_dir) / split
+    skipped  = 0
+    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() \
+                else torch.float16
 
-    seen_dirs = set()
-    futures = []
+    for batch_idx, (imgs, xs, ys, zooms, labels, rel_paths) in enumerate(tqdm(loader)):
+        # imgs : (B, n_sac, 3, H, W)
+        imgs = imgs.to(device)
+        imgs = imgs.view(batch_size*n_uplet, 3, resolution, resolution)
 
-    def save_one(out_path, zs, xs_i, ys_i):
-        parent = out_path.parent
-        if parent not in seen_dirs:
-            parent.mkdir(parents=True, exist_ok=True)
-            seen_dirs.add(parent)
-        torch.save({"zs": zs, "xs": xs_i, "ys": ys_i}, out_path)
+        with torch.cuda.amp.autocast(dtype=amp_dtype):
+            with torch.inference_mode():
+                z = model.forward_features(imgs)[:,0,:]    # (B* n_sac, D)
+        z = z.view(batch_size, n_uplet, embed_dim)
 
-    with ThreadPoolExecutor(max_workers=4) as io_pool, torch.inference_mode():
-        for imgs, xs, ys, zooms, labels, rel_paths in tqdm(loader):
-            B, V, C, H, W = imgs.shape
-            imgs = imgs.to(device, non_blocking=True).view(B * V, C, H, W)
+        # sauvegarder chaque embedding dans un dossier séparé
+        for i, rel_path in enumerate(rel_paths):
+            out_path = out_root / rel_path
+            out_path = out_path.with_suffix(".pt")    # remplace .JPEG par .pt
 
-            with torch.autocast(device_type=device.type, dtype=amp_dtype):
-                z = model(imgs)                # (B*V, D)
-            D = z.shape[-1]
-            z_cpu = z.view(B, V, D).half().cpu()   # un seul transfert GPU->CPU pour tout le batch
+            # skip si déjà généré (reprise après interruption)
+            if out_path.exists():
+                skipped += 1
+                continue
 
-            for i, rel_path in enumerate(rel_paths):
-                out_path = (out_root / rel_path).with_suffix(".pt")
-                futures.append(io_pool.submit(save_one, out_path, z_cpu[i], xs[i], ys[i]))
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Sauvegarder z[i], xs[i], et ys[i] dans un dictionnaire
+            data_to_save = {
+                "zs": z[i].half().cpu(),
+                "xs": xs[i].cpu(),  # 
+                "ys": ys[i].cpu(),  # 
+            }
 
-        for f in futures:
-            f.result()  # propage toute erreur d'ecriture (disque plein, permissions...)
+            torch.save(data_to_save, out_path)
 
-    print(f"  Terminé — {n_already} fichiers déjà existants ignorés.")
+    print(f"  Terminé — {skipped} fichiers déjà existants ignorés.")
+
+# from concurrent.futures import ThreadPoolExecutor
+
+# @torch.no_grad()
+# def generate_embeddings(model, split, dataset_raw, output_dir,
+#                          n_sac, zoom, std,
+#                          batch_size, num_workers, device):
+#     print(f"\n── Génération embeddings — {split} ──────────────────────────")
+
+#     out_root = Path(output_dir) / split
+
+#     # filtre les images deja traitees AVANT de construire le dataset :
+#     # on ne paie ni le cout CPU (ShiftZoomUplet) ni le GPU pour elles.
+#     root = Path(dataset_raw.root)
+#     todo_samples, n_already = [], 0
+#     for path, label in dataset_raw.samples:
+#         rel_path = Path(path).relative_to(root)
+#         out_path = (out_root / rel_path).with_suffix(".pt")
+#         (todo_samples if not out_path.exists() else [None]).append((path, label)) \
+#             if not out_path.exists() else None
+#         if out_path.exists():
+#             n_already += 1
+#         else:
+#             todo_samples.append((path, label))
+#     dataset_raw.samples = todo_samples
+#     dataset_raw.imgs = todo_samples
+
+#     if not todo_samples:
+#         print(f"  Rien a faire — {n_already} fichiers deja generes.")
+#         return
+
+#     dataset = FlatUpletDataset(
+#         base_folder=dataset_raw, zoom=zoom, std=std,
+#         start_center=False, n_uplet=n_sac, path=True,
+#     )
+#     loader = DataLoader(
+#         dataset, batch_size=batch_size, shuffle=False,
+#         num_workers=num_workers, pin_memory=True,
+#         persistent_workers=True, prefetch_factor=4, drop_last=True,
+#     )
+
+#     model.eval()
+#     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+#     seen_dirs = set()
+#     futures = []
+
+#     def save_one(out_path, zs, xs_i, ys_i):
+#         parent = out_path.parent
+#         if parent not in seen_dirs:
+#             parent.mkdir(parents=True, exist_ok=True)
+#             seen_dirs.add(parent)
+#         torch.save({"zs": zs, "xs": xs_i, "ys": ys_i}, out_path)
+
+#     with ThreadPoolExecutor(max_workers=4) as io_pool, torch.inference_mode():
+#         for imgs, xs, ys, zooms, labels, rel_paths in tqdm(loader):
+#             B, V, C, H, W = imgs.shape
+#             imgs = imgs.to(device, non_blocking=True).view(B * V, C, H, W)
+
+#             with torch.autocast(device_type=device.type, dtype=amp_dtype):
+#                 z = model(imgs)                # (B*V, D)
+#             D = z.shape[-1]
+#             z_cpu = z.view(B, V, D).half().cpu()   # un seul transfert GPU->CPU pour tout le batch
+
+#             for i, rel_path in enumerate(rel_paths):
+#                 out_path = (out_root / rel_path).with_suffix(".pt")
+#                 futures.append(io_pool.submit(save_one, out_path, z_cpu[i], xs[i], ys[i]))
+
+#         for f in futures:
+#             f.result()  # propage toute erreur d'ecriture (disque plein, permissions...)
+
+#     print(f"  Terminé — {n_already} fichiers déjà existants ignorés.")
 
 
 

@@ -64,8 +64,10 @@ n_saccades_max = 30
 n_uplet_teacher = 15
 n_probes = 3
 
-orig = True
 grid = False
+orig = True
+flat = True
+
 curriculum = False
 finetune = False
 
@@ -110,7 +112,6 @@ if curriculum or finetune:
 if curriculum: suffix = suffix + "_CURRI"
 if finetune: 
     suffix = suffix + "_FINE"
-if grid : suffix = suffix + "_GRID"
     
 if stop_gradient : suffix = suffix + "_STOP"
 if inv_temp != 1: suffix = suffix + f"_IT{inv_temp}"
@@ -127,7 +128,9 @@ if residual:
 if skip_ff_l:
     suffix = suffix + "_SKIP"
 
+if grid : suffix = suffix + "_GRID"
 if orig: suffix = suffix + "_ORIG"
+if flat: suffix = suffix + "_FLAT"
 
 save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_W_sab{n_sab}_{suffix}_t{n_uplet_teacher}_space"
 
@@ -142,12 +145,20 @@ if local == False:
         except:
             pass
     elif orig: 
-        mount_point = os.path.expanduser("~/imagenet_orig")
-        try:
-            os.makedirs(mount_point, exist_ok=True)
-            subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig", mount_point, "-o", "reconnect"], check=True)
-        except:
-            pass
+        if flat:
+            mount_point = os.path.expanduser("~/imagenet_orig_flat")
+            try:
+                os.makedirs(mount_point, exist_ok=True)
+                subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig_flat", mount_point, "-o", "reconnect"], check=True)
+            except:
+                pass
+        else:
+            mount_point = os.path.expanduser("~/imagenet_orig")
+            try:
+                os.makedirs(mount_point, exist_ok=True)
+                subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig", mount_point, "-o", "reconnect"], check=True)
+            except:
+                pass
     else:
         mount_point = os.path.expanduser("~/imagenet")
         try:
@@ -162,8 +173,12 @@ else:
         train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
     elif orig:
-        train_dir = "data/Imagenet_Z_orig/train"   # Imagenet Validation set
-        val_dir = "data/Imagenet_Z_orig/val"   # Imagenet Validation set
+        if flat:
+            train_dir = "data/Imagenet_Z_orig_flat/train"   # Imagenet Validation set
+            val_dir = "data/Imagenet_Z_orig_flat/val"   # Imagenet Validation set
+        else:
+            train_dir = "data/Imagenet_Z_orig/train"   # Imagenet Validation set
+            val_dir = "data/Imagenet_Z_orig/val"   # Imagenet Validation set
     else:
         train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set
@@ -301,7 +316,13 @@ if curriculum or finetune:
 
 
 if pos_supervised:
-    z_linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
+    if orig:
+        if flat:
+            z_linear_head_dir = "../checkpoints/checkpoints_260929_EMA_Xattn_linear_head_flat"
+        else:
+            z_linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
+    else:
+        z_linear_head_dir = "../checkpoints/checkpoints_260414_EMA_Xattn_1_view"
 
     z_linear_head = nn.Linear(embed_dim, 1000)
 

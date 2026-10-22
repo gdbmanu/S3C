@@ -59,8 +59,9 @@ n_sab = 4 #
 
 n_heads = 12
 
-orig = True
 grid = False
+orig = True
+flat = True
 
 train_epochs = 100
 
@@ -73,6 +74,8 @@ suffix = suffix + f"_a{alpha}"
     
 if grid : suffix = suffix + "_GRID"
 if orig: suffix = suffix + "_ORIG"
+if flat: suffix = suffix + "_FLAT"
+
 
 save_dir = f"../checkpoints/{datetime.now().strftime('%y%m%d')}_SHIFT_{suffix}"
 
@@ -87,12 +90,20 @@ if local == False:
         except:
             pass
     elif orig: 
-        mount_point = os.path.expanduser("~/imagenet_orig")
-        try:
-            os.makedirs(mount_point, exist_ok=True)
-            subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig", mount_point, "-o", "reconnect"], check=True)
-        except:
-            pass
+        if flat:
+            mount_point = os.path.expanduser("~/imagenet_orig_flat")
+            try:
+                os.makedirs(mount_point, exist_ok=True)
+                subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig_flat", mount_point, "-o", "reconnect"], check=True)
+            except:
+                pass
+        else:
+            mount_point = os.path.expanduser("~/imagenet_orig")
+            try:
+                os.makedirs(mount_point, exist_ok=True)
+                subprocess.run(["sshfs", "dauce.e@brain-lid-008:Recherche/scripts/S3C/scripts/data/Imagenet_Z_orig", mount_point, "-o", "reconnect"], check=True)
+            except:
+                pass
     else:
         mount_point = os.path.expanduser("~/imagenet")
         try:
@@ -107,8 +118,12 @@ else:
         train_dir = "data/Imagenet_grid_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_grid_Z/val"   # Imagenet Validation set
     elif orig:
-        train_dir = "data/Imagenet_Z_orig/train"   # Imagenet Validation set
-        val_dir = "data/Imagenet_Z_orig/val"   # Imagenet Validation set
+        if flat:
+            train_dir = "data/Imagenet_Z_orig_flat/train"   # Imagenet Validation set
+            val_dir = "data/Imagenet_Z_orig_flat/val"   # Imagenet Validation set
+        else:
+            train_dir = "data/Imagenet_Z_orig/train"   # Imagenet Validation set
+            val_dir = "data/Imagenet_Z_orig/val"   # Imagenet Validation set
     else:
         train_dir = "data/Imagenet_Z/train"   # Imagenet Validation set
         val_dir = "data/Imagenet_Z/val"   # Imagenet Validation set

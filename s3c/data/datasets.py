@@ -249,7 +249,22 @@ def make_dataloader(root, std, n_views, zoom=1.5, start_center=False, batch_size
                     transform="fovea",resolution=128, n_levels=4,
                          random_levels=True, fixed_level=None): # limit=500 pour un test rapide
     dataset = FoveatedUpletDataset(
+<<<<<<< HEAD
         root,
+=======
+        base_folder=root,
+        zoom=zoom,
+        std=std,
+        start_center=start_center, 
+        n_uplet=n_views,
+        limit=limit
+    )
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+
+def make_flat_dataloader(root, zoom, std, n_views, start_center=False, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
+    dataset = FlatUpletDataset(
+        base_folder=root,
+>>>>>>> e787b6f (resolved)
         zoom=zoom,
         std=std,
         transform=transform, 
