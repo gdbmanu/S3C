@@ -10,9 +10,9 @@ from tqdm import tqdm
 import pandas as pd
 
 from s3c.models.student_teacher import StudentWithYPredictor, update_ema_student_teacher
-from s3c.data.datasets import make_pair_dataloader
+from s3c.data.datasets import make_pair_dataloader, make_dataloader
 
-from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 import nltk
 nltk.download('wordnet')
@@ -104,7 +104,7 @@ def _optim_path(ckpt_path):
     return root + "_optim" + ext   # X_checkpoint.pt -> X_checkpoint_optim.pt
 
 def train_teacher_student_Xattn(
-        dino_model, mlp, zoom, std_min, std_max,
+        dino_model, mlp, std_min, std_max,
         data_kwargs=None,
         start_center=True, layernorm=False,
         train_dir="", val_dir="",
@@ -203,8 +203,8 @@ def train_teacher_student_Xattn(
         mult = (1 - 0.95**epoch) / (1 - 0.95**max(epochs - 1, 1))
         std = std_min + mult * (std_max - std_min)
 
-        train_loader = make_pair_dataloader(train_dir, zoom, std, start_center=start_center, batch_size=batch_size, **data_kwargs)
-        val_loader = make_pair_dataloader(val_dir, zoom, std, start_center=start_center, batch_size=batch_size, **val_data_kwargs)
+        train_loader = make_pair_dataloader(train_dir, std, start_center=start_center, batch_size=batch_size, **data_kwargs)
+        val_loader = make_pair_dataloader(val_dir, std, start_center=start_center, batch_size=batch_size, **val_data_kwargs)
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, (img1, img2, y_target) in enumerate(pbar):
@@ -341,178 +341,127 @@ def train_teacher_student_Xattn(
     return dino_student_y, dino_teacher, mlp, history
 
 
-class SIGReg(nn.Module):
-    """
-    Sketched Isotropic Gaussian Regularization (LeJEPA, Balestriero & LeCun 2025).
-
-    Pour chaque direction aléatoire w tirée sur la sphère unité :
-      - on projette les embeddings du batch : s = z @ w  →  (B,) scalaires
-      - on mesure l'écart entre la FCE empirique de s et celle de N(0,1)
-        via le test d'Epps-Pulley
-
-    Si la loss → 0, alors pour toute direction w, z@w ~ N(0,1),
-    ce qui implique par Cramér-Wold que z ~ N(0, I).
-    """
-    def __init__(self, n_projections=256, n_t_points=17):
-        super().__init__()
-        self.n_projections = n_projections
-        # Grille de points t fixe, partagée entre appels
-        # Plage [-4, 4] : capture bien la queue de N(0,1)
-        self.register_buffer(
-            't_grid',
-            torch.linspace(-5, 5, n_t_points)   # (T,)
-        )
-
-    def epps_pulley_1d(self, x):
-        """
-        Mesure l'écart entre la distribution de x et N(0,1).
-
-        x     : (B,) — une projection 1D des embeddings
-        return : scalaire ≥ 0, = 0 ssi x ~ N(0,1)
-
-        Fonction caractéristique empirique :
-          φ̂(t) = (1/B) Σ_j [cos(t·x_j) + i·sin(t·x_j)]
-
-        Cible théorique pour N(0,1) :
-          φ(t) = exp(-t²/2)  (réelle pure)
-
-        Loss = moyenne sur t de |φ̂(t) - φ(t)|²
-             = moyenne sur t de [(Re φ̂(t) - exp(-t²/2))² + (Im φ̂(t))²]
-        """
-        device = x.device
-        t = self.t_grid.to(device)                          # (T,)
-
-        # Produits t·x_j pour tous les couples (t, x_j)
-        # x : (B,)  →  x.unsqueeze(0) : (1, B)
-        # t : (T,)  →  t.unsqueeze(1) : (T, 1)
-        tx = t.unsqueeze(1) * x.unsqueeze(0)    # (T, B)
-
-        # Fonction caractéristique empirique
-        ecf_real = torch.cos(tx).mean(dim=1)    # (T,)  moyenne sur le batch
-        ecf_imag = torch.sin(tx).mean(dim=1)    # (T,)
-
-        # Cible théorique N(0,1)
-        cf_target = torch.exp(-0.5 * t ** 2)    # (T,)  réelle pure
-
-        # Écart quadratique moyen sur la grille de t
-        # partie réelle + partie imaginaire (qui devrait être ~0)
-        loss = ((ecf_real - cf_target) ** 2
-                + ecf_imag ** 2).mean()          # scalaire
-
-        return loss
-
-    def forward(self, z):
-        """
-        z : (B, d_model) — embeddings du batch (bruts, sans normalisation)
-        """
-        B, d = z.shape
-
-        # Directions de projection aléatoires uniformes sur la sphère S^{d-1}
-        # Propriété : si w ~ Uniforme(S^{d-1}) et z ~ N(0, I),
-        # alors w·z ~ N(0, 1)  — c'est exactement ce qu'on veut vérifier
-        device = z.device
-        W = torch.randn(d, int(self.n_projections), device=device,
-                        dtype=z.dtype)
-        W = F.normalize(W, dim=0)               # (d, n_proj) — colonnes unitaires
-
-        # Projections : chaque colonne est une variable scalaire pour le batch
-        projections = z @ W                     # (B, n_projections)
-
-        # Epps-Pulley sur chaque projection, moyenné
-        # Vectorisé : on traite toutes les projections d'un coup
-        # projections.T : (n_proj, B)
-        t = self.t_grid.to(device)                                      # (T,)
-        # tx[k, i, j] = t_i * proj_{k,j}
-        # projections.T : (n_proj, B)
-        # t              : (T,)
-        # → on veut (n_proj, T, B)
-        tx = t.view(1, -1, 1) * projections.T.unsqueeze(1)  # (n_proj, T, B)
-
-        ecf_real = torch.cos(tx).mean(dim=2)    # (n_proj, T)
-        ecf_imag = torch.sin(tx).mean(dim=2)    # (n_proj, T)
-
-        cf_target = torch.exp(-0.5 * t ** 2)    # (T,)
-
-        # Écart pour chaque projection et chaque point t
-        loss = ((ecf_real - cf_target.view(1, -1)) ** 2
-                + ecf_imag ** 2).mean()         # scalaire
-
-        return loss
-
-def sigreg(x, global_step, num_slices=256):
-    """
-    SIGReg — version single-GPU (LeJEPA officiel simplifié).
-    
-    x           : (N, D) embeddings float32
-    global_step : entier — seed pour synchroniser les projections
-                  entre context et target (même A pour les deux)
-    num_slices  : nombre de directions de projection (256 dans le papier)
-    """
-    N, D = x.shape
-
-    # ── 1. Directions de projection ───────────────────────────────────
-    # Seed fixé par global_step : même A si on appelle sigreg(x_c) 
-    # puis sigreg(x_t) au même step — cohérence entre les deux appels
-    g = torch.Generator(device=x.device)
-    g.manual_seed(global_step)
-    A = torch.randn(D, num_slices, generator=g, device=x.device,
-                    dtype=x.dtype)
-    A /= A.norm(p=2, dim=0)                    # colonnes unitaires
-
-    # ── 2. Points d'intégration et cible théorique ────────────────────
-    t      = torch.linspace(-5, 5, 17, device=x.device, dtype=x.dtype)
-    exp_f  = torch.exp(-0.5 * t ** 2)          # CF de N(0,1) + fenêtre gaussienne
-
-    # ── 3. Fonction caractéristique empirique ─────────────────────────
-    # x @ A  : (N, num_slices)      — projections scalaires
-    # .unsqueeze(2) * t : (N, num_slices, 17)  — produits t·projection
-    x_t = (x @ A).unsqueeze(2) * t             # (N, num_slices, 17)
-    ecf = torch.exp(1j * x_t).mean(dim=0)      # (num_slices, 17) — moyenne batch
-
-    # ── 4. Écart pondéré à la cible ───────────────────────────────────
-    err = (ecf - exp_f).abs().square() * exp_f  # (num_slices, 17)
-
-    # ── 5. Intégration par trapèzes, normalisée par N ─────────────────
-    loss = torch.trapezoid(err, t, dim=1) * N   # (num_slices,)
-
-    return loss.mean()                          # scalaire
 
 
-def vicReg_seed(z):
-    """
-    z: Tenseur de taille [B, k, d]
-        B = Taille du batch
-        k = Les k vecteurs latents (z1, z2, z3,...), dont o,n renforce la "diversité"
-        d = Dimension de chaque vecteur latent
-    """
-    B, k, d = z.shape 
-    
-    # 1. CENTRAGE de chaque vecteur z_i sur sa dimension d
-    # On centre par rapport à la moyenne des features pour stabiliser le calcul
-    z_centered = z - z.mean(dim=-1, keepdim=True)
-    
-    # 2. CALCUL DE LA MATRICE DE COVARIANCE (B, k, k)
-    # On fait le produit matriciel entre les aspects pour chaque élément du batch
-    # (B, k, d) x (B, d, k) -> (B, k, k)
-    # Chaque matrice 3x3 représente les corrélations entre z1, z2 et z3 pour une scène donnée.
-    cov_matrices = torch.bmm(z_centered, z_centered.transpose(1, 2)) / (d - 1)
-    
-    # 3. PERTE DE COVARIANCE (Hors-diagonale -> 0)
-    # On crée un masque pour extraire uniquement les éléments hors-diagonale
-    mask = ~torch.eye(k, dtype=torch.bool, device=z.device) # Matrice kxk avec False sur la diagonale
-    mask_batch = mask.unsqueeze(0).expand(B, -1, -1)        # Étendu à la taille du batch (B, k, k)
-    
-    # On isole les éléments hors-diagonale, on les élève au carré, et on fait la moyenne
-    off_diag_elements = cov_matrices[mask_batch]
-    loss_cov = torch.mean(off_diag_elements ** 2)
-    
-    # 4. PERTE DE VARIANCE (Diagonale -> gamma)
-    # Pour éviter l'effondrement (z1=z2=z3=0), on force la variance de chaque z_i à être >= gamma
-    # On calcule l'écart-type de chaque vecteur z_i (taille [B, k])
-    std = torch.sqrt(z.var(dim=-1) + 1e-4)
-    loss_var = torch.mean(torch.clamp(1 - std, min=0.0))
-    
-    # Perte totale combinée
-    total_loss = loss_cov + loss_var
-    
-    return total_loss
+
+@torch.no_grad()
+def _evaluate(dino_model, linear_head, loader, criterion, device, amp_dtype, use_amp, max_batches=None):
+    """Loss et top-1 (%) sur max_batches batchs du loader (None = tout le loader)."""
+    linear_head.eval()
+    loss_sum, correct, total = 0.0, 0, 0
+    for i, (mosaics, _, _, _, labels) in enumerate(loader):
+        if max_batches is not None and i >= max_batches:
+            break
+        mosaics, labels = mosaics.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            features = dino_model(mosaics)[:, 0]
+        out = linear_head(features.float())
+        loss_sum += criterion(out, labels).item() * labels.size(0)
+        correct += (out.argmax(1) == labels).sum().item()
+        total += labels.size(0)
+    linear_head.train()
+    return loss_sum / total, 100.0 * correct / total
+ 
+ 
+def train_linear_head(
+    dino_model,
+    linear_head,
+    std,
+    n_uplet=1,
+    start_center=False,
+    train_dir="",
+    val_dir="",
+    data_kwargs=None,
+    batch_size=256,
+    device="cuda",
+    epochs=20,
+    lr=0.01,
+    momentum=0.9,
+    weight_decay=1e-4,
+    nesterov=True,
+    warmup_epochs=5,
+    warmup_start_factor=0.1,
+    amp="float16",            # backbone gelé : "float16" | "bfloat16" | "none" (la tête reste en fp32)
+    log_interval=100,
+    val_batches=20,
+    final_full_val=True,
+    save_dir="../checkpoints/checkpoints_teacher_student",
+    run_name=None,
+):
+    os.makedirs(save_dir, exist_ok=True)
+    run_name = run_name or datetime.now().strftime("%Y%m%d")
+    ckpt_path = os.path.join(save_dir, f"{run_name}_checkpoint.pt")
+    log_path = os.path.join(save_dir, f"{run_name}_training_log.csv")
+ 
+    amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "none": None}[amp]
+    use_amp = amp_dtype is not None
+ 
+    # backbone gelé, tête entraînable
+    dino_model = dino_model.to(device).eval()
+    for p in dino_model.parameters():
+        p.requires_grad = False
+    linear_head = linear_head.to(device).train()
+ 
+    # SGD sur la tête seule ; warmup linéaire puis cosinus, avancé à chaque epoch
+    optimizer = torch.optim.SGD([p for p in linear_head.parameters() if p.requires_grad],
+                                lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[LinearLR(optimizer, start_factor=warmup_start_factor, total_iters=warmup_epochs),
+                    CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)],
+        milestones=[warmup_epochs],
+    )
+    criterion = nn.CrossEntropyLoss()
+ 
+    data_kwargs = {**data_kwargs, "random_levels": False}
+    loader_kw = dict(std=std, n_views=n_uplet, start_center=start_center,
+                     batch_size=batch_size, **(data_kwargs or {}))
+    train_loader = make_dataloader(train_dir, **loader_kw)
+    val_loader = make_dataloader(val_dir, **loader_kw)
+ 
+    history = {"epoch": [], "batch": [], "train_loss": [], "val_loss": [], "val_top1": []}
+ 
+    for epoch in range(epochs):
+        running_loss = torch.zeros((), device=device)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+ 
+        for batch_idx, (mosaics, _, _, _, labels) in enumerate(pbar):
+            mosaics, labels = mosaics.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+ 
+            with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                features = dino_model(mosaics)[:, 0]
+            loss = criterion(linear_head(features.float()), labels)
+ 
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.detach()          # pas de .item() à chaque itération
+ 
+            if (batch_idx + 1) % log_interval == 0:
+                train_loss = running_loss.item() / log_interval
+                running_loss.zero_()
+ 
+                val_loss, val_top1 = _evaluate(dino_model, linear_head, val_loader, criterion,
+                                               device, amp_dtype, use_amp, max_batches=val_batches)
+ 
+                pbar.set_postfix({"loss": f"{train_loss:.4f}", "top1": f"{val_top1:.2f}%"})
+                for k, v in zip(history, (epoch + 1, batch_idx + 1, train_loss, val_loss, val_top1)):
+                    history[k].append(v)
+                _atomic_save({"epoch": epoch, "batch": batch_idx + 1,
+                             "classifier": linear_head.state_dict(), "history": history}, ckpt_path)
+                pd.DataFrame(history).to_csv(log_path, index=False)
+ 
+        scheduler.step()
+ 
+    # validation complète finale (ajoutée à l'historique comme dernière ligne, batch = -1)
+    if final_full_val:
+        val_loss, val_top1 = _evaluate(dino_model, linear_head, val_loader, criterion,
+                                       device, amp_dtype, use_amp)
+        print(f"Validation complète : loss={val_loss:.4f} | top-1={val_top1:.2f}%")
+        for k, v in zip(history, (epochs, -1, float("nan"), val_loss, val_top1)):
+            history[k].append(v)
+ 
+    _atomic_save({"epoch": epochs - 1, "batch": len(train_loader),
+                 "classifier": linear_head.state_dict(), "history": history}, ckpt_path)
+    pd.DataFrame(history).to_csv(log_path, index=False)
+    return linear_head, history

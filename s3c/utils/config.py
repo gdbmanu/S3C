@@ -40,3 +40,4 @@ def load_config(path, overrides=()):
             raise KeyError(f"Override '{override}': clé '{last}' inexistante")
         d[last] = yaml.safe_load(val)   # gère int, float, bool, listes, null
     return cfg
+

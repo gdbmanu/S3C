@@ -67,13 +67,13 @@ def main():
         n_levels      = len(m["scales"]),
         random_levels = t["random_levels"],
         fixed_level   = t["fixed_level"],
+        zoom          = t["zoom"],
     )
 
     # ── entraînement ─────────────────────────────────────────────────────
     trained = train_teacher_student_Xattn(
         dino_model        = base_model,
         mlp               = mlp,        
-        zoom              = t["zoom"],
         std_min           = float(t["std_min"]) / t["zoom"],
         std_max           = float(t["std_max"]) / t["zoom"],
         data_kwargs       = data_kwargs,

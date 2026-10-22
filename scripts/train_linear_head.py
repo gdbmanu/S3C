@@ -1,256 +1,129 @@
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-
-import random
-import copy
-
-import subprocess
-
-from urllib.request import urlopen
-
-import torch
-import torch.nn as nn
-
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-
-
-from torchvision import datasets
-
-import timm
-
-from s3c.models.foveated_vit import FoveatedMultiViT, build_foveated_pos_embed
-from s3c.data.transforms import ShiftZoomUplet, FoveatedPyramidTransform
-from s3c.data.datasets import FoveatedUpletDataset, make_dataloader
-
-from PIL import Image
-
-from tqdm import tqdm
-
-
-# --- Configuration générale ---
-batch_size = 256
-num_workers = 4
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-resolution = 128
-embed_dim = 768
-
-# Monter le dossier distant
-local=True
-if local == False:
-    mount_point = os.path.expanduser("~/imagenet_mount")
-
-    try:
-        os.makedirs(mount_point, exist_ok=True)
-        subprocess.run(["sshfs", "dauce.e@brain-lid-004:data/Imagenet_full", mount_point, "-o", "reconnect"], check=True)
-    except:
-        pass
-
-    # Ton code ici, en utilisant mount_point
-    train_dir = os.path.join(mount_point, "train")
-    val_dir = os.path.join(mount_point, "val")
-else:
-    train_dir = "~/data/Imagenet_full/train"   # Imagenet Validation set
-    val_dir = "~/data/Imagenet_full/val"   # Imagenet Validation set
-
-load_dir = "../checkpoints/checkpoints_EMA_Xattn_260416"
-
-save_dir = "../checkpoints/checkpoints_260427_EMA_Xattn_linear_head"
-#save_dir = "./checkpoints_260414_base_1_view"
-
-
-epoch_teacher = 20
-
-zoom = 1.5
-
-std = 0.3 #* zoom
-
-n_uplet = 1
-
-train_epochs = 20
-
-
-# model = timm.create_model('vit_small_patch16_dinov3.lvd1689m', pretrained=True)
-model_name = "vit_base_patch8_224.dino"
-model_orig = timm.create_model(model_name, pretrained=True)
-
-#model.head = nn.Identity()  # Supprimer la tête existante
-model_orig.patch_embed.strict_img_size = False
-norm_ref = copy.deepcopy(model_orig.norm)
-
-#state_dict = torch.load("dino_v3_tiny_pretrained.pth")
-#model.load_state_dict(state_dict, strict=False)
-
-build_foveated_pos_embed(model_orig,
-                        base_img_size=224,
-                        patch_size=8,
-                        mosaic_sub_patch_grid=8,   # 8 patches par sous-image (64px/8)
-                        scales=(1.0, 0.5, 0.25, 0.125))
-
-checkpoint_path = os.path.join(load_dir, f"checkpoint_epoch{epoch_teacher}.pt")  # exemple
-checkpoint = torch.load(checkpoint_path, map_location="cpu")
-# Vérifie les clés disponibles
-print("Clés du checkpoint :", checkpoint.keys())
-# --- Récupération des poids du teacher ---
-if "teacher" not in checkpoint:
-    raise KeyError(f"Aucune clé 'teacher' trouvée dans {checkpoint_path}")
-
-state_dict = checkpoint["teacher"]
-
-model = FoveatedMultiViT(model_orig)
-
-# --- Chargement dans le modèle ---
-if True: ## !! BASE
-    missing, unexpected = model.model.load_state_dict(state_dict, strict=False)
-
-    print("➡️ Poids chargés (teacher).")
-    print("❗ Paramètres manquants :", missing)
-    print("⚠️ Paramètres inattendus :", unexpected)
-
-
-model.model.norm = norm_ref #= nn.Identity() #!! pas de normalisation en sortie
-model.to(device)
-model.eval()
-
-# 2. Geler le backbone
-for param in model.parameters():
-    param.requires_grad = False
-
-
-train_dataset_raw   = datasets.ImageFolder(train_dir, transform=None)
-val_dataset_raw   = datasets.ImageFolder(val_dir, transform=None)
-
-train_loader = make_dataloader(train_dataset_raw, zoom, std, n_uplet, batch_size=batch_size, num_workers=num_workers, limit=None)
-val_loader = make_dataloader(val_dataset_raw, zoom, std, n_uplet, batch_size=batch_size, num_workers=num_workers, limit=None)
-
-
-# Définir la tête linéaire
-linear_head = nn.Linear(model_orig.embed_dim, 1000)
-linear_head.to(device)
-linear_head.train()
-
-os.makedirs(save_dir, exist_ok=True)
-
-# Optimiseur
-#optimizer = torch.optim.SGD(linear_head.parameters(), lr=0.001, momentum=0.9)
-optimizer = torch.optim.SGD(
-    linear_head.parameters(),
-    lr=0.01,              # Facebook utilise 0.01 avec batch_size=256
-    momentum=0.9,
-    weight_decay=1e-4,    # régularisation importante
-    nesterov=True,
-)
-
-scaler = torch.cuda.amp.GradScaler()
-
-criterion = nn.CrossEntropyLoss()
-
-# %%
-
-#scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs)
-
-warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-cosine = CosineAnnealingLR(optimizer, T_max=train_epochs - 5)
-scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
-
-#mosaics, sxs, sys_, zooms, labels = next(iter(train_loader)) # TEST!
-#c = input('continuer?')
-
-# %%
-from tqdm import tqdm
-
-log_interval = 100
-
-history = {"epoch": [], "batch": [], 
-        "loss": [], "classif": []} #, "train_loss_3": []}
-
-os.makedirs(save_dir, exist_ok=True)
-
-for epoch in range(train_epochs):  # 20-30 époques suffisent
-
-    total_loss = 0
-
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{train_epochs}")
-
-    for batch_idx, (mosaics, sxs, sys_, zooms, labels) in enumerate(pbar):
-
-        mosaics = mosaics.to(device)          # (B, V, 3, H, W)
-        sxs     = sxs.to(device)             # (B, V)
-        sys_    = sys_.to(device)
-        zooms   = zooms.to(device)
-        labels   = labels.to(device)
-        #images = [img.to(device, non_blocking=True) for img in images]
-        #labels = labels.to(device, non_blocking=True)
-
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                features = model(mosaics)  # Extraction des features
-            output = linear_head(features[:,0])
-            loss = criterion(output, labels)
-
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        total_loss += loss.item()
-
-        if (batch_idx + 1) % log_interval == 0:
-
-            print(f"Epoch {epoch+1:03d} | simple loss = {total_loss / log_interval:.4f}")
-
-            history["epoch"].append(epoch + 1)
-            history["batch"].append(batch_idx + 1)
-            history["loss"].append(total_loss / log_interval)
-
-            total_loss = 0
-
-            total = 0
-            correct = 0.0
-            val_iter = iter(val_loader)
-
-            with torch.no_grad():
-                for _ in range(5):
-                    mosaics, sxs, sys_, zooms, labels = next(val_iter)
-
-                    mosaics = mosaics.to(device)          # (B, V, 3, H, W)
-                    sxs     = sxs.to(device)             # (B, V)
-                    sys_    = sys_.to(device)
-                    zooms   = zooms.to(device)
-                    labels   = labels.to(device)
-                    #images = [img.to(device, non_blocking=True) for img in images]
-                    #labels = labels.to(device, non_blocking=True)
-
-                    features = model(mosaics)
-                    output = linear_head(features[:,0,...])
-                    loss = criterion(output, labels)
-
-                    preds = output.argmax(dim=1)
-
-                    correct += (preds == labels).sum().item()
-
-                    total += labels.size(0)
-
-            print(f"Top-1 accuracy: {100 * correct / total:.2f}%")
-
-            history["classif"].append(100 * correct / total)
-
-            torch.save({
-                    "epoch": epoch,
-                    "history": history,
-                    "classifier": linear_head.state_dict(),
-                },  os.path.join(save_dir, f"checkpoint_epoch{epoch+1}.pt"))
-            
-            df = pd.DataFrame(history)
-            df.to_csv(os.path.join(save_dir, "training_log_teach_{epoch_teacher}.csv"), index=False)        
-
-    scheduler.step()
-
-# Démonter le dossier à la fin
-subprocess.run(["fusermount", "-u", mount_point], check=True)
- 
-
-
-
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+
+from s3c.utils.config import load_config
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("overrides", nargs="*", help="ex: training.epochs=50")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config, args.overrides)
+    print(yaml.dump(cfg, sort_keys=False))
+
+    ckpt_path = Path(cfg["teacher"]["checkpoint"] or "").expanduser()
+    #if not ckpt_path.is_file():
+    #    raise FileNotFoundError(f"teacher.checkpoint introuvable : {ckpt_path}")
+
+    # imports locaux après lecture de la config
+    import timm
+    import torch
+    import torch.nn as nn
+    from s3c.models.foveated_vit import FoveatedMultiViT, build_foveated_pos_embed, build_flat_pos_embed
+    from s3c.utils.training import train_linear_head
+
+    m, d, t = cfg["model"], cfg["data"], cfg["training"]
+    transform = m["transform"]
+    if transform not in ("fovea", "flat"):
+        raise ValueError(f"model.transform doit valoir 'fovea' ou 'flat', reçu : {transform!r}")
+    if t["fixed_level"] is not None and not 0 <= t["fixed_level"] < len(m["scales"]):
+        raise ValueError(f"training.fixed_level doit être dans [0, {len(m['scales']) - 1}] ou null")
+    device = t["device"]
+
+    # ── nom du run et dossier de sortie : le dossier du teacher ──────────
+    # fichiers : <run du teacher>_linear_head_<date>_{checkpoint.pt, training_log.csv, config.yaml}
+    suffix = "_checkpoint.pt"
+    teacher_run = ckpt_path.name[: -len(suffix)] if ckpt_path.name.endswith(suffix) else ckpt_path.stem
+    head_date = str(t["run_name"]) if t["run_name"] else datetime.now().strftime("%Y%m%d")
+
+    run_name = f"{teacher_run}_linear_head_{head_date}" if not t["orig"] else f"orig_linear_head_{head_date}"
+
+    save_dir = Path(t["save_dir"]).expanduser() if t["save_dir"] else ckpt_path.parent
+    save_dir.mkdir(parents=True, exist_ok=True)
+    if (save_dir / f"{run_name}_checkpoint.pt").exists():
+        raise FileExistsError(f"{run_name} existe déjà : changez training.run_name pour ne pas l'écraser.")
+
+    # ── sauvegarde de la config effectivement utilisée ───────────────────
+    with open(save_dir / f"{run_name}_config.yaml", "w") as f:
+        yaml.dump(cfg, f, sort_keys=False)
+
+    # ── backbone : identique à train_teacher_student.py ──────────────────
+    base_model = timm.create_model(m["name"], pretrained=m["pretrained"])
+    base_model.patch_embed.strict_img_size = False
+    if transform == "fovea":
+        build_foveated_pos_embed(
+            base_model,
+            base_img_size         = m["img_size"],
+            patch_size            = m["patch_size"],
+            mosaic_sub_patch_grid = m["mosaic_sub_patch_grid"],
+            scales                = m["scales"],
+        )
+    else:  # "flat"
+        build_flat_pos_embed(
+            base_model,
+            base_img_size   = m["img_size"],
+            patch_size      = m["patch_size"],
+            dest_image_size = m["mosaic_size"],
+        )
+
+    # ── teacher : poids du réseau entraîné ───────────────────────────────
+    teacher = FoveatedMultiViT(base_model, norm=False)   # sans norme finale : elle est placée dans la tête
+    if not t["orig"]:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        missing, unexpected = teacher.model.load_state_dict(ckpt["teacher"], strict=False)
+        if unexpected or any(not k.startswith("norm.") for k in missing):
+            raise RuntimeError(f"Poids du teacher incompatibles : manquants={missing}, inattendus={unexpected}")
+        print(f"Teacher chargé : {ckpt_path.name} (epoch {ckpt['epoch'] + 1})")
+
+    # ── tête linéaire = LayerNorm + projection ───────────────────────────
+    # La LayerNorm finale du backbone passe dans la tête (même résultat sur le token CLS) :
+    # c'est celle du teacher si layernorm=True à l'entraînement, sinon celle de DINO pré-entraîné.
+    norm = base_model.norm
+    for p in norm.parameters():
+        p.requires_grad = False
+    linear_head = nn.Sequential(norm, nn.Linear(base_model.embed_dim, t["num_classes"]))
+
+    data_kwargs = dict(
+        transform   = transform,
+        resolution  = m["mosaic_size"],
+        num_workers = d["num_workers"],
+        limit       = d["limit"],
+        fixed_level = t["fixed_level"],
+        zoom        = t["zoom"],
+    )
+
+    # ── entraînement ─────────────────────────────────────────────────────
+    trained = train_linear_head(
+        dino_model          = teacher,
+        linear_head         = linear_head,
+        std                 = float(d["std"]),
+        n_uplet             = d["n_uplet"],
+        start_center        = t["start_center"],
+        train_dir           = str(Path(d["train_dir"]).expanduser()),
+        val_dir             = str(Path(d["val_dir"]).expanduser()),
+        data_kwargs         = data_kwargs,
+        batch_size          = t["batch_size"],
+        device              = device,
+        epochs              = t["epochs"],
+        lr                  = float(t["lr"]),
+        momentum            = float(t["momentum"]),
+        weight_decay        = float(t["weight_decay"]),
+        nesterov            = t["nesterov"],
+        warmup_epochs       = t["warmup_epochs"],
+        warmup_start_factor = float(t["warmup_start_factor"]),
+        amp                 = t["amp"],
+        log_interval        = t["log_interval"],
+        val_batches         = t["val_batches"],
+        final_full_val      = t["final_full_val"],
+        save_dir            = str(save_dir),
+        run_name            = run_name,
+    )
+
+
+if __name__ == "__main__":
+    main()

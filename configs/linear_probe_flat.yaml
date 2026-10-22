@@ -1,0 +1,38 @@
+
+# configs/linear_probe_flat.yaml  -- tête linéaire sur le teacher "flat"
+# Identique à linear_probe.yaml mais hérite de teacher_student_flat.yaml.
+defaults:
+  - base
+  - teacher_student_flat
+
+teacher:
+  checkpoint: null     # OBLIGATOIRE : <dossier du teacher>/<run>_checkpoint.pt (ou en ligne de commande)
+  orig: true           # use original weights
+
+data:
+  std: 0.3             # amplitude des saccades (fixe ici, contrairement à std_min/std_max du teacher)
+  n_uplet: 1           # nombre de vues par image (la tête utilise la première)
+  num_workers: 16       # ici le dataloader est plus souvent le goulot que le GPU : surveiller GPU-Util
+
+training:
+  # ── tête : (LayerNorm) + projection linéaire ──
+  num_classes: 1000
+  start_center: false
+  random_levels: false  
+  fixed_level: null            # niveau de dégradation des images (0..len(scales)-1) ; null = image complète
+  # ── précision du backbone gelé (la tête reste en fp32, sans GradScaler) ──
+  amp: float16                 # float16 | bfloat16 | none
+  # ── SGD ──
+  batch_size: 256
+  epochs: 20
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  nesterov: true
+  warmup_epochs: 5             # warmup linéaire puis cosinus, avancé une fois par epoch
+  warmup_start_factor: 0.1
+  # ── suivi ──
+  final_full_val: true         # validation sur tout le set de val à la fin
+  save_dir: null               # null -> dossier du teacher
+  run_name: null               # null -> date AAAAMMJJ ; fichiers : <run teacher>_linear_head_<run_name>_*
+

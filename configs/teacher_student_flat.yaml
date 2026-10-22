@@ -1,0 +1,17 @@
+defaults:
+  - base
+
+model:
+  transform: flat      # "fovea" ou "flat"
+  layernorm: false
+
+training:
+  batch_size: 64
+  ema_momentum: 0.9999
+  std_min: 0.1
+  std_max: 0.5
+  zoom: 1.5
+  start_center: true
+  random_levels: true  
+  save_dir: ../checkpoints/checkpoints_teacher_student_flat
+

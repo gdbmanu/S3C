@@ -25,11 +25,14 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
                  n_uplet,
                  transform="fovea",      # "fovea" ou "flat"
                  output_size=128,
+                 n_levels=4,
                  start_center=False,
                  limit=None,
-                 path=False):
+                 path=False,
+                 random_levels=True, 
+                 fixed_level=None):                 
 
-        self.base = base_folder
+        self.base = datasets.ImageFolder(base_folder, transform=None)
         self.shiftzoom_transform = ShiftZoomUplet(zoom=zoom, std=std,
                                                   n_uplet=n_uplet,
                                                   start_center=start_center)
@@ -40,6 +43,11 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
             self.fovea_transform = FlatTransform(output_size)
         else:
             raise ValueError(f"transform doit valoir 'fovea' ou 'flat', reçu : {transform!r}")
+        
+        self.random_levels = random_levels
+        self.fixed_level = fixed_level
+        if fixed_level is not None and not 0 <= fixed_level < self.n_levels:
+            raise ValueError(f"fixed_level doit être dans [0, {self.n_levels - 1}], reçu : {fixed_level}")
 
         self.post_process = transforms.Compose([
             transforms.ToTensor(),
@@ -60,10 +68,17 @@ class FoveatedUpletDataset(torch.utils.data.Dataset):
 
         fov_views, sxs, sys_, zooms = [], [], [], []
         for view, sx, sy, zoom in views:
-            fov_views.append(self.post_process(self.fovea_transform(view)))
+            if self.random_levels:
+                fov_views.append(self.post_process(self.fovea_transform(view, level=np.random.randint(self.n_levels))))
+            elif self.fixed_level is not None:
+                fov_views.append(self.post_process(self.fovea_transform(view, level=self.fixed_level)))
+            else:
+                fov_views.append(self.post_process(self.fovea_transform(view)))
             sxs.append(sx)
             sys_.append(sy)
             zooms.append(zoom)
+
+            # appliquer fovéation + post_process
 
         out = (
             torch.stack(fov_views),                        # (V, 3, output_size, output_size)
@@ -87,17 +102,25 @@ class FoveatedGridDataset(FoveatedUpletDataset):
                  n_grid      = 11,
                  transform   = "fovea",     # "fovea" ou "flat"
                  output_size = 128,
-                 limit       = None,
+                 n_levels=4,
+                 start_center=True, 
+                 limit=None, 
+                 random_levels=True, 
+                 fixed_level=None,
                  path        = False):
+        
         super().__init__(
             base_folder  = base_folder,
             zoom         = zoom,
             std          = 0.0,
             n_uplet      = n_grid * n_grid,
             transform    = transform,
+            n_levels     = n_levels,
             output_size  = output_size,
-            start_center = False,
+            start_center = start_center,
             limit        = limit,
+            random_levels= random_levels,
+            fixed_level  = fixed_level,
             path         = path,
         )
         # Remplace le ShiftZoomUplet aléatoire par la grille déterministe
@@ -222,11 +245,18 @@ def collate_uplet(batch):
 
 
 # %%
-def make_dataloader(root, zoom, std, n_views, start_center=False, batch_size=32, num_workers=4, limit=None): # limit=500 pour un test rapide
+def make_dataloader(root, std, n_views, zoom=1.5, start_center=False, batch_size=32, num_workers=4, limit=None, 
+                    transform="fovea",resolution=128, n_levels=4,
+                         random_levels=True, fixed_level=None): # limit=500 pour un test rapide
     dataset = FoveatedUpletDataset(
-        root=root,
+        root,
         zoom=zoom,
         std=std,
+        transform=transform, 
+        output_size=resolution,
+        n_levels=n_levels,
+        random_levels=random_levels, 
+        fixed_level=fixed_level,
         start_center=start_center, 
         n_uplet=n_views,
         limit=limit
@@ -235,7 +265,7 @@ def make_dataloader(root, zoom, std, n_views, start_center=False, batch_size=32,
 
 
 
-def make_pair_dataloader(root, zoom, std, start_center=True, batch_size=32,
+def make_pair_dataloader(root, std, zoom=1.5, start_center=True, batch_size=32,
                          num_workers=4, limit=None, transform="fovea",
                          resolution=128, n_levels=4,
                          random_levels=True, fixed_level=None):
