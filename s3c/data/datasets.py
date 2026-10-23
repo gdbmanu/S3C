@@ -1,6 +1,8 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import datasets, transforms
+from pycocotools.coco import COCO
+
 
 from s3c.data.transforms import ShiftZoomUplet, ShiftZoomGrid, FoveatedPyramidTransform, FlatTransform
 
@@ -10,9 +12,9 @@ import random
 
 from pathlib import Path
 
+from PIL import Image
 
 
-from pathlib import Path
 import torch
 from torchvision import transforms
 
@@ -195,6 +197,100 @@ class FoveatedPairDataset(Dataset):
     def __len__(self):
         return len(self.base_dataset)
 
+class FoveatedCocoUpletDataset(torch.utils.data.Dataset):
+    def __init__(self, img_root, ann_file, zoom, std, n_uplet=30,
+             max_labeled=5, output_size=128, min_box=4,
+             dedup_labels=False, clip_labeled=False, path=False):
+        self.coco = COCO(ann_file)
+        self.img_root = Path(img_root)
+        self.ids = sorted(self.coco.getImgIds())
+        self.n_uplet, self.std = n_uplet, std
+        self.max_labeled, self.min_box = max_labeled, min_box
+        self.dedup_labels, self.clip_labeled = dedup_labels, clip_labeled
+        self.path = path
+
+        cat_ids = sorted(self.coco.getCatIds())
+        self.cat2idx = {c: i for i, c in enumerate(cat_ids)}
+        self.idx2name = {i: self.coco.loadCats(c)[0]["name"]
+                        for c, i in self.cat2idx.items()}
+
+        self.shiftzoom_transform = ShiftZoomUplet(zoom=zoom, std=std, n_uplet=n_uplet)
+        self.fovea_transform = FoveatedPyramidTransform(output_size=output_size)
+        self.post_process = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        
+    def _labeled_targets(self, img_id, W, H):
+        rng = random.Random(img_id)
+        anns = self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id, iscrowd=False))
+        targets = []
+        for a in anns:
+            x, y, w, h = a["bbox"]
+            # bornage à l'image (certaines bboxes COCO dépassent légèrement)
+            x0, y0 = max(0., x), max(0., y)
+            x1, y1 = min(float(W), x + w), min(float(H), y + h)
+            if (x1 - x0) < self.min_box or (y1 - y0) < self.min_box:
+                continue
+            targets.append(((x0 + x1) / 2, (y0 + y1) / 2,
+                            self.cat2idx[a["category_id"]]))
+
+        if self.dedup_labels:
+            by_cls = {}
+            for t in targets:
+                by_cls.setdefault(t[2], []).append(t)
+            targets = [rng.choice(v) for v in by_cls.values()]
+
+        if len(targets) > self.max_labeled:
+            targets = rng.sample(targets, self.max_labeled)
+        return targets
+    
+    def  __getitem__(self, idx):
+        img_id = self.ids[idx]
+        info = self.coco.loadImgs(img_id)[0]
+        img = Image.open(self.img_root / info["file_name"]).convert("RGB")
+        W, H = img.size
+        ref = min(W, H)
+
+        # 1) vues avec label : centrées sur les bboxes
+        shifts, labels = [], []
+        for bx, by, lab in self._labeled_targets(img_id, W, H):
+            sx = 2 * (bx - W / 2) / ref
+            sy = 2 * (by - H / 2) / ref
+            if self.clip_labeled:
+                sx, sy = max(-1., min(1., sx)), max(-1., min(1., sy))
+            shifts.append((sx, sy))
+            labels.append(lab)
+
+        # 2) vues sans label : positions aléatoires, label -1
+        n_rand = self.n_uplet - len(shifts)
+        for _ in range(n_rand):
+            sx, sy = np.random.normal(0, self.std, 2)
+            shifts.append((float(np.clip(sx, -1, 1)), float(np.clip(sy, -1, 1))))
+            labels.append(-1)
+
+        # 3) un seul appel : crops pour toute la liste de décalages
+        views = self.shiftzoom_transform(img, views_list=shifts)
+
+        fov, sxs, sys_, zooms = [], [], [], []
+        for view, sx, sy, z in views:
+            view = transforms.Resize(512)(view)
+            view = transforms.CenterCrop(512)(view)
+            fov.append(self.post_process(self.fovea_transform(view)))
+            sxs.append(sx); sys_.append(sy); zooms.append(z)
+
+        out = (torch.stack(fov),
+            torch.tensor(sxs, dtype=torch.float32),
+            torch.tensor(sys_, dtype=torch.float32),
+            torch.tensor(zooms, dtype=torch.float32),
+            torch.tensor(labels, dtype=torch.long))
+        if self.path:
+            out += (info["file_name"],)
+        return out
+
+    def __len__(self):
+        return len(self.ids)
+
     
 class ImageNetZDataset(Dataset):
     """
@@ -215,14 +311,45 @@ class ImageNetZDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]
-        dict = torch.load(path, map_location="cpu") #.float()  # (n_sac, D)
-        zs = dict["zs"].float()
-        xs = dict["xs"].float()
-        ys = dict["ys"].float()
+        d = torch.load(path, map_location="cpu") #.float()  # (n_sac, D)
+        zs = d["zs"].float()
+        xs = d["xs"].float()
+        ys = d["ys"].float()
         return zs, xs, ys, label
 
     def __len__(self):
         return len(self.samples)
+
+
+class CocoZDataset(Dataset):
+    """
+    Charge les embeddings pré-calculés depuis <root>/ (ex. coco_z/val/).
+    Retourne (zs, xs, ys, labels) :
+      zs     : (n_sac, D)  float32
+      xs, ys : (n_sac,)    float32
+      labels : (n_sac,)    long, indice de classe 0..79, ou -1 (vue aléatoire)
+    Avec return_id=True, retourne en plus l'image_id COCO (int).
+    """
+    def __init__(self, root, return_id=False):
+        self.root = Path(root).expanduser()
+        self.files = sorted(self.root.glob("*.pt"))   # tri → ordre déterministe
+        if not self.files:
+            raise FileNotFoundError(f"Aucun .pt trouvé dans {self.root}")
+        self.return_id = return_id
+
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        d = torch.load(path, map_location="cpu")
+        zs = d["zs"].float()
+        xs = d["xs"].float()
+        ys = d["ys"].float()
+        labels = d["labels"].long()
+        if self.return_id:
+            return zs, xs, ys, labels, int(path.stem)   # "000000397133" -> 397133
+        return zs, xs, ys, labels
+
+    def __len__(self):
+        return len(self.files)
 
 
 
